@@ -1,0 +1,23 @@
+# Ignore object files
+*.o
+*.obj
+
+# Ignore compiled executables
+*.exe
+*.out
+a.out
+
+# Ignore compiled Python files
+*.pyc
+__pycache__/
+
+# Ignore editor swap files
+*~
+*.swp
+
+# Ignore environment files
+.env
+venv/
+
+# Ignore log files
+*.log

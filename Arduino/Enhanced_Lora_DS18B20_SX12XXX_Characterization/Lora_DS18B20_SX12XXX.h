@@ -20,7 +20,7 @@
 
 //*******  Setup LoRa Parameters Here ! ***************
 //LoRa Modem Parameters
-const uint32_t DEFAULT_CHANNEL = 865200000;     //frequency of transmissions in hertz
+const uint32_t DEFAULT_CHANNEL = 868000000;     //frequency of transmissions in hertz
 const uint32_t Offset = 0;                      //offset frequency for calibration purposes
 uint8_t SpreadingFactor = LORA_SF12;            //LoRa spreading factor
 uint8_t Bandwidth = LORA_BW_125;                //LoRa bandwidth
@@ -43,7 +43,8 @@ const uint8_t Optimisation = LDRO_AUTO;         //low data rate optimisation set
 
 //*******  Setup LoRa Parameters Here ! ***************
 //LoRa Modem Parameters - optimized for sensor data transmission
-const uint32_t DEFAULT_CHANNEL = 865200000;     //frequency of transmissions in hertz
+//const uint32_t DEFAULT_CHANNEL = 865200000;     //frequency of transmissions in hertz
+const uint32_t DEFAULT_CHANNEL = 868000000; 
 const uint32_t Offset = 0;                      //offset frequency for calibration purposes
 uint8_t SpreadingFactor = LORA_SF12;            //LoRa spreading factor (long range)
 uint8_t Bandwidth = LORA_BW_125;                //LoRa bandwidth

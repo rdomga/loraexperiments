@@ -55,7 +55,7 @@ while ($cursor = $it->current()) {
 // 20201109 engineer
 //		.gmdate('Y-m-d H:i:s', $cur['time']->sec).";"
 		.gmdate('Y-m-d H:i:s', $cur['time']->toDateTime()->getTimestamp()).";"
-		.$cur['data'].";"
+		.$cur['data'] //.";"
 		."\n");
 
    $it->next();

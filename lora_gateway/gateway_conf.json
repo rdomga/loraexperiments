@@ -19,9 +19,9 @@
     "log_post_processing": true,
     "log_weekly": false,
     "auto_update": false,
-    "downlink": 0,
-    "downlink_lorawan": true,
-    "downlink_network_server": "eu1.cloud.thethings.network",
+    "downlink": 30,
+    "downlink_lorawan": false,
+    "downlink_network_server": " ",
     "status": 600,
     "aux_radio": 0
   },

@@ -1,0 +1,43 @@
+--- fleet_control.py
++++ fleet_control.py
+@@ -336,6 +336,12 @@
+     cmd_group.add_argument("--channel", type=int, choices=range(0, 8), help="Set single channel index (0-7)")
+     cmd_group.add_argument("--battery-thresholds", type=str, metavar="LOW,RECOVER,CRIT,PSAVE,PSAVE_REC",
+                            help="Set 5 battery thresholds (mV), comma-separated, e.g. '335,360,315,350,380'")
++    # NIGHT battery strategy builds only (firmware BATTERY_STRATEGY_NIGHT); other builds answer "Unknown command"
++    cmd_group.add_argument("--night-thresholds", type=str, metavar="ENTER,EXIT",
++                           help="Night mode thresholds in raw ADC counts: store below ENTER, resume at or above EXIT (EXIT >= ENTER+4), e.g. '375,388'. RAM-only until --commit")
++    cmd_group.add_argument("--night-interval", type=int, metavar="SEC", help="Reading interval while storing at night, seconds (30-14400). RAM-only until --commit")
++    cmd_group.add_argument("--night-override", type=int, choices=[0, 1, 2], help="Operator override: 0=force night OFF (guarded), 1=force night ON, 2=automatic. RAM-only")
++    cmd_group.add_argument("--night-resend", type=int, metavar="SEQ", help="Mark saved night readings from this sequence number on as unsent, so they are sent again after the next uplink")
+     cmd_group.add_argument("--save-eeprom", action="store_true", help="Force pending EEPROM writes immediately without waiting for 20-frame batch")
+ 
+     # Destructive commands
+@@ -447,6 +453,27 @@
+         except ValueError:
+             print("Error: all battery thresholds must be integer millivolts.", file=sys.stderr)
+             sys.exit(1)
++    elif args.night_thresholds is not None:
++        parts = [p.strip() for p in args.night_thresholds.split(",")]
++        try:
++            if len(parts) != 2:
++                raise ValueError
++            enter, exit_ = [int(p) for p in parts]
++        except ValueError:
++            print("Error: --night-thresholds needs two integers: ENTER,EXIT (raw ADC counts).", file=sys.stderr)
++            sys.exit(1)
++        body["night_thresholds"] = {"enter": enter, "exit": exit_}
++        label = f"Night thresholds (store <{enter}, resume >={exit_})"
++    elif args.night_interval is not None:
++        body["night_interval"] = args.night_interval
++        label = f"Night interval ({args.night_interval} s)"
++    elif args.night_override is not None:
++        body["night_override"] = args.night_override
++        label = f"Night override ({['force OFF', 'force ON', 'automatic'][args.night_override]})"
++        is_destructive = (args.night_override == 0)   # forcing night off lets the node transmit at the weakest moment
++    elif args.night_resend is not None:
++        body["night_resend"] = args.night_resend
++        label = f"Night resend (from seq {args.night_resend})"
+     elif args.save_eeprom:
+         body["save_eeprom"] = True
+         label = "Save to EEPROM"

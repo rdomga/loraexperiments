@@ -1,0 +1,407 @@
+// TTN Payload Decoder — MCCI_ttn_Raw_DHT22_Dust_Gas_SmartGated
+// Sensor: DHT22 + GP2Y1010AU0F optical dust sensor + gas sensor + battery divider
+//
+// Port 1 is unchanged from the AlwaysOn sketch (still 9 bytes, mode is NOT
+// included there by design). Port 2 grows by one byte to carry the current
+// operating mode — see the layout below.
+//
+// Pure bytes -> typed raw values. No derived/computed fields (no voltage,
+// no density/ppm conversion) — that logic intentionally lives downstream in
+// ThingsBoard, not here, so nothing calculated on the TTN side can go stale
+// or mislead (see GP2Y_Debug/Baseline_Ratchet_Notes.html for why the dust
+// baseline can't be a fixed formula; same reasoning applies here).
+//
+// Port 1 payload layout (14 bytes, positional):
+//   [0-1]  Temperature  int16  ×10   → °C  (0x8000 = sensor failure)
+//   [2]    Humidity     uint8  ×2    → %   (0xFF = sensor failure)
+//   [3-4]  Dust ADC     uint16       → raw 0–1023, always the real reading
+//   [5-6]  Gas ADC      uint16       → raw 0–1023, always the real reading
+//   [7-8]  Battery ADC  uint16       → raw 0–1023, always the real reading
+//   [9]    Reading boot id       uint8
+//   [10-11] Reading sequence     uint16
+//   [12-13] Reading uptime min   uint16  (minutes into that boot)
+// The last five bytes identify the stored reading this frame reports. Old
+// 9-byte frames still decode; they simply carry no anchor fields.
+//
+// Port 2 payload layout (26 bytes, status; grows to 29 on 2026-09-10, to 34 and then 42 on 2026-11-02, see the length-guarded blocks in decodeStatus) — widened 2026-09-10 per
+// Field_Diagnostics_And_Remote_Configuration_2026-09-07.md §7.1/§7.2. Same
+// field order/sizes as port 1 for the shared fields, plus a reset-reason
+// byte, an operating-mode byte, and (bytes 17-25) the config tunables that
+// were previously write-only via downlink with no readback:
+//   [0-1]   TX interval    uint16  → seconds
+//   [2-5]   seqnoUp        uint32  → uplink counter
+//   [6-7]   Temperature    int16  ×10   → °C  (0x8000 = sensor failure)
+//   [8]     Humidity       uint8  ×2    → %   (0xFF = sensor failure)
+//   [9-10]  Dust ADC       uint16       → raw 0–1023, always the real reading
+//   [11-12] Gas ADC        uint16       → raw 0–1023, always the real reading
+//   [13-14] Battery ADC    uint16       → raw 0–1023, always the real reading
+//   [15]    Reset reason   uint8  bitfield, captured at the boot that sent this frame:
+//             bit0 PORF  (power-on reset)
+//             bit1 EXTRF (external/reset pin)
+//             bit2 BORF  (brown-out — a real BOD trip, rare: BOD threshold is
+//                         2.7V and the known TX-pulse rail sag only reaches ~3.8V)
+//             bit3 WDRF  (watchdog reset — expected on every deliberate
+//                         softwareReset(), e.g. a downlink-triggered restart)
+//             bit4 synthesized "hang recovery" — set only when WDRF fired
+//                         WITHOUT a preceding deliberate softwareReset(): the
+//                         on-device hang-detection watchdog caught firmware
+//                         that was genuinely stuck (e.g. a blocking call left
+//                         waiting forever after the boost rail sagged during a
+//                         TX pulse) and self-recovered. This frame is sent
+//                         automatically, ahead of the normal boot burst,
+//                         whenever bit4 is set — see MCCI_ttn_Raw_DHT22_Dust_Gas_SmartGated.ino.
+//           Note: bit3 (WDRF) fires identically for /@R# (plain restart,
+//           EEPROM untouched) and /@Z# (factory reset, EEPROM wiped) —
+//           this byte alone cannot tell which one happened. Over the air,
+//           the only after-the-fact tell is byte 16 bit 7 (profile_saved)
+//           dropping from 1 to 0 in the following status frame after a
+//           /@Z#. `radio_saved` (my_eeprom.radio_saved) would flip the
+//           same way but isn't in this payload at all yet — visible only
+//           via the serial /@P# dump (see §8.3, Field_Diagnostics_And_
+//           Remote_Configuration_2026-09-07.md).
+//   [16]    Operating mode + ping reason + profile_saved  uint8, bitfield since 2026-09-10,
+//           widened 2026-09-11 for the init-phase connectivity gate:
+//             bits 0-1  mode: 0 = NORMAL, 1 = NORMAL_NO_GAS, 2 = ALWAYS_ON
+//             bits 2-4  ping_reason (added 2026-09-11): 0=RATIO (autonomous cadence),
+//                       1=DEADMAN (§4 dead-man check), 2=VERIFY (§3.8 SF/TXP/channel
+//                       candidate), 3=MANUAL (/@P1# operator request), 4=INIT (boot
+//                       connectivity gate, clean or dirty restart) — see
+//                       MCCI_ttn_Raw_DHT22_Dust_Gas_SmartGated.ino's PING_REASON_* defines
+//             bit 7     profile_saved (1 = the last /@CP# actually committed
+//                       to EEPROM) — mirrors my_eeprom.profile_saved
+//           A decoder built before 2026-09-10 read this byte raw as mode;
+//           it MUST mask with & 0x03 now that bit 7 carries a second flag,
+//           or mode/mode_name breaks (indexes past the 3-entry name array)
+//           the first time profile_saved is ever true.
+//           mode persistence is commit-gated (see /@CP# in the .ino): a bare
+//           mode change is RAM-only and reverts to the last *committed*
+//           value (or NORMAL if nothing was ever committed) on any reboot;
+//           only a mode change followed by /@CP# survives indefinitely —
+//           except ALWAYS_ON, which is deliberately never committed
+//           (silently saved as NORMAL instead, for brownout-loop safety).
+//           Check bit 7 (profile_saved) in this same byte to know which
+//           case applies before treating a dashboard value as still
+//           authoritative after a boot-reason byte in the same frame
+//           indicates a fresh reset.
+//   [17]    Sensor bypass mask  uint8  bitmask, bit0=DHT22 bit1=dust bit2=gas bit3=battery, 1=read enabled
+//   [18-19] Gas warmup          uint16 → seconds, current gas_getWarmupSeconds()
+//   [20]    Battery LOW / 2           uint8 → raw ADC = value × 2
+//   [21]    Battery RECOVER / 2       uint8 → raw ADC = value × 2
+//   [22]    Battery CRITICAL / 2      uint8 → raw ADC = value × 2
+//   [23]    Battery POWERSAVE / 2     uint8 → raw ADC = value × 2
+//   [24]    Battery POWERSAVE_RECOVER / 2  uint8 → raw ADC = value × 2
+//   [25]    Ping ratio           uint8 → status frame sent every N successful uplinks
+//   [26]    Radio SF (DR value)  uint8  → EU868 DR: 0=SF12 1=SF11 2=SF10 3=SF9 4=SF8 5=SF7
+//   [27]    Radio TX power       uint8  → dBm, direct value
+//   [28]    Radio channel        uint8  → EU868 channel index 0-8
+//           Added 2026-09-10 (§8.3, Field_Diagnostics_And_Remote_
+//           Configuration_2026-09-07.md) — sf/tx_power/channel were
+//           downlink-settable via /@F#/@X#/@C# but never echoed back until
+//           now. Reflects current RAM state, same as sensor_mask/gas_warmup/
+//           battery thresholds above; not gated on radio_saved (see byte
+//           16's profile_saved bit for that kind of flag) — a value still
+//           mid-§3.8-verification is the real active value regardless of
+//           whether it's committed yet.
+//
+// Validity model:
+// - Temperature/humidity share one hard-failure sentinel (0x8000 / 0xFF) —
+//   a genuine DHT22 read failure (checksum/no response) has no raw value to
+//   report, so there's nothing to preserve; dht22_valid is derived from that
+//   sentinel, same as before.
+// - Dust/gas/battery ADC are NEVER sentinel-collapsed on the wire — the
+//   device always sends its real raw reading (0-1023), even one it considers
+//   implausible. Rejection is decided HERE, in this decoder, from the raw
+//   value against the thresholds below (mirrored from dust_sensor.h /
+//   gas_sensor.h / battery_sensor.h) — not by trusting a firmware flag. That
+//   means the accept/reject bounds can be retuned by editing this decoder,
+//   with no firmware re-flash, no redeploy to the field.
+// - The device still keeps its OWN copy of these thresholds internally (see
+//   the .ino / *_sensor.cpp), because the battery guard's sleep/interval
+//   decisions are real-time and can't wait on this decoder or a downlink
+//   round trip. That on-device judgment no longer affects what's on the
+//   wire, though — it only drives local control flow.
+// - Known gap: this decoder can only reproduce the *bounds* half of each
+//   sensor's on-device check, not the parts that need data which never
+//   leaves the device — dust's flat-reading/no-jitter check (needs the raw
+//   sample min/max from the 100-pulse window, not just the trimmed mean) and
+//   the gas sensor's warmup-elapsed check (needs a device-side boot clock). A reading
+//   that's flagged valid here could still have failed one of those on-device
+//   checks. If that distinction matters, it'd need extra wire bytes (e.g.
+//   rawMin/rawMax for dust) — not done here since nothing currently consumes
+//   it.
+//
+// Pin note: LED control is on D5 (D2 is reserved for LMIC DIO0), gas sensor on A2
+// (needs a 100k pull-down — not populated yet), battery divider on A1
+
+// Mirrored from dust_sensor.h / gas_sensor.h / battery_sensor.h — bounds
+// only (see "Known gap" above). Keep these in sync if the firmware side
+// changes, or intentionally diverge if you want the decoder to judge
+// validity differently than the device does; that's the point of moving
+// this here.
+var DUST_ADC_MIN_VALID = 2;      // at/below this = pinned near GND (dead/disconnected output)
+var DUST_ADC_MAX_VALID = 900;    // at/above this = pinned near VCC (floating/short)
+var GAS_ADC_MIN_VALID  = 5;      // at/below this = pinned near GND (pull-down engaged, sensor absent)
+var GAS_ADC_MAX_VALID  = 1018;   // at/above this = pinned near VCC (short/fault)
+var BATTERY_ADC_MIN_VALID = 5;   // at/below this = R1/battery+ path open
+var BATTERY_ADC_MAX_VALID = 440; // at/above this = implausible for this divider/cell
+
+function decodeSensor(bytes) {
+  var rawTemp = (bytes[0] << 8) | bytes[1];
+  var rawHum  = bytes[2];
+  var rawDust = (bytes[3] << 8) | bytes[4];
+  var rawGas  = (bytes[5] << 8) | bytes[6];
+  var rawBatt = (bytes[7] << 8) | bytes[8];
+
+  // Temp and humidity come from the same DHT22 read and always fail together
+  // (see readSensors() in the .ino — one lastSensorValid gates both).
+  var dht22Valid = (rawTemp !== 0x8000) && (rawHum !== 0xFF);
+  var dustValid = (rawDust > DUST_ADC_MIN_VALID) && (rawDust < DUST_ADC_MAX_VALID);
+  var gasValid  = (rawGas  > GAS_ADC_MIN_VALID)  && (rawGas  < GAS_ADC_MAX_VALID);
+  var battValid = (rawBatt > BATTERY_ADC_MIN_VALID) && (rawBatt < BATTERY_ADC_MAX_VALID);
+
+  var temp = rawTemp;
+  if (temp > 32767) temp -= 65536;
+
+  var hum = rawHum / 2.0;
+
+  var result = {};
+  result.type         = "sensor";
+  result.temperature  = dht22Valid ? temp / 10.0 : null;
+  result.humidity     = dht22Valid ? hum         : null;
+  result.dht22_valid  = dht22Valid;
+  result.dust_adc     = rawDust;
+  result.dust_valid   = dustValid;
+  result.gas_adc      = rawGas;
+  result.gas_valid    = gasValid;
+  result.battery_adc  = rawBatt;
+  result.battery_valid = battValid;
+  return result;
+}
+
+function decodeStatus(bytes) {
+  var interval  = (bytes[0] << 8) | bytes[1];
+
+  var seqno = (bytes[2] * 16777216) +
+              (bytes[3] << 16) +
+              (bytes[4] << 8)  +
+               bytes[5];
+
+  var rawTemp = (bytes[6] << 8) | bytes[7];
+  var temp = rawTemp;
+  if (temp > 32767) temp -= 65536;
+
+  var hum     = bytes[8] / 2.0;
+  var rawDust = (bytes[9] << 8) | bytes[10];
+  var rawGas  = (bytes[11] << 8) | bytes[12];
+  var rawBatt = (bytes[13] << 8) | bytes[14];
+  var resetReason = bytes[15];
+  // Byte 16 is a bitfield since 2026-09-10 (Field_Diagnostics §7.1/§7.2):
+  // bits 0-1 = mode, bit 7 = profile_saved. Mask, don't read raw — a raw
+  // read broke mode_name the moment profile_saved was ever true.
+  var modeByte = bytes[16];
+  var mode = modeByte & 0x03;
+  var pingReason = (modeByte >> 2) & 0x07;
+  var profileSaved = !!(modeByte & 0x80);
+
+  // Temp and humidity come from the same DHT22 read and always fail together
+  // (see readSensors() in the .ino — one lastSensorValid gates both).
+  var dht22Valid = (rawTemp !== 0x8000) && (bytes[8] !== 0xFF);
+  var dustValid = (rawDust > DUST_ADC_MIN_VALID) && (rawDust < DUST_ADC_MAX_VALID);
+  var gasValid  = (rawGas  > GAS_ADC_MIN_VALID)  && (rawGas  < GAS_ADC_MAX_VALID);
+  var battValid = (rawBatt > BATTERY_ADC_MIN_VALID) && (rawBatt < BATTERY_ADC_MAX_VALID);
+
+  var result = {};
+  result.type          = "status";
+  result.dht22_valid    = dht22Valid;
+  result.tx_interval    = interval;
+  result.seqnoUp        = seqno;
+
+  if (dht22Valid) {
+    result.temperature = temp / 10.0;
+    result.humidity    = hum;
+  }
+  result.dust_adc      = rawDust;
+  result.dust_valid    = dustValid;
+  result.gas_adc       = rawGas;
+  result.gas_valid     = gasValid;
+  result.battery_adc   = rawBatt;
+  result.battery_valid = battValid;
+
+  result.reset_reason        = resetReason;
+  result.reset_porf          = !!(resetReason & 0x01);
+  result.reset_extrf         = !!(resetReason & 0x02);
+  result.reset_borf          = !!(resetReason & 0x04);
+  result.reset_wdrf          = !!(resetReason & 0x08);
+  result.reset_hang_recovery = !!(resetReason & 0x10);
+
+  result.mode          = mode;
+  result.mode_name     = ["NORMAL", "NORMAL_NO_GAS", "ALWAYS_ON"][mode] || "UNKNOWN";
+  result.ping_reason      = pingReason;
+  result.ping_reason_name = ["RATIO", "DEADMAN", "VERIFY", "MANUAL", "INIT"][pingReason] || "UNKNOWN";
+  result.profile_saved = profileSaved;
+
+  // Bytes 17-25: config-tunable readback, added 2026-09-10. Guarded on
+  // length so a node still running pre-widening firmware (17-byte frame)
+  // decodes cleanly instead of reading undefined/NaN off the end of the
+  // array during the field rollout window.
+  if (bytes.length >= 26) {
+    result.sensor_mask       = bytes[17];
+    result.gas_warmup_s      = (bytes[18] << 8) | bytes[19];
+    result.batt_low          = bytes[20] * 2;
+    result.batt_recover      = bytes[21] * 2;
+    result.batt_critical     = bytes[22] * 2;
+    result.batt_psave        = bytes[23] * 2;
+    result.batt_psave_recover = bytes[24] * 2;
+    result.ping_ratio        = bytes[25];
+  }
+
+  // Bytes 26-28: radio config readback, added 2026-09-10 (§8.3). Same
+  // length-guard reasoning as bytes 17-25 above, separate check since a
+  // node could in principle ship the §7.1 widen without this one.
+  if (bytes.length >= 29) {
+    var DR_TO_SF = [12, 11, 10, 9, 8, 7]; // EU868: DR0=SF12 ... DR5=SF7
+    result.radio_dr  = bytes[26];
+    result.sf        = DR_TO_SF[bytes[26]] || 0;
+    result.tx_power  = bytes[27];
+    result.channel   = bytes[28];
+  }
+
+  // Bytes 29-33 and bits 5-6 of byte 16: battery strategy and its declared state, added 2026-11-02. Older nodes send 29
+  // bytes and leave these fields out. Byte 16 bits 5-6: 0 NONE (depletion run), 1 LADDER (POWERSAVE/LOW/CRITICAL), 2 NIGHT.
+  //   [29]  guard state bitfield: bit0 night mode active, bit1 CRITICAL floor, bit2 ladder LOW, bit3 ladder POWERSAVE,
+  //         bit4 confirming morning read (night mode, first good read seen)
+  //   [30]  night enter threshold / 2 (raw ADC)    [31] night exit threshold / 2    [32] night interval, minutes
+  //   [33]  saved readings waiting to be sent (capped at 255)
+  if (bytes.length >= 34) {
+    var STRATEGY_NAMES = ["none", "ladder", "storage"];
+    var strat = (modeByte >> 5) & 0x03;
+    result.battery_strategy        = STRATEGY_NAMES[strat] || "unknown";
+    result.sag_active              = !!(bytes[29] & 0x01);
+    result.critical_floor          = !!(bytes[29] & 0x02);
+    result.ladder_low              = !!(bytes[29] & 0x04);
+    result.ladder_powersave        = !!(bytes[29] & 0x08);
+    result.sag_exit_pending        = !!(bytes[29] & 0x10);
+    result.outage_fallback_active  = !!(bytes[29] & 0x20);
+    result.sag_enter_adc           = bytes[30] * 2;
+    result.sag_exit_adc            = bytes[31] * 2;
+    result.sag_interval_min        = bytes[32];
+    result.buffer_unsent           = bytes[33];
+  }
+
+  // Bytes 34-41: the latest energy sag event
+  if (bytes.length >= 42) {
+    var sAgo = (bytes[35] << 8) | bytes[36];
+    var eAgo = (bytes[37] << 8) | bytes[38];
+    result.node_boot_id            = bytes[34];
+    result.sag_last_start_ago_min  = (sAgo === 0xFFFF) ? null : sAgo;
+    result.sag_last_end_ago_min    = (eAgo === 0xFFFF) ? null : eAgo;
+    result.sag_events_since_boot   = bytes[39];
+    result.buffer_records_lost     = (bytes[40] << 8) | bytes[41];
+  }
+
+  // Bytes 42-45: Port 2 anchor, added 2026-11-15. The meaning of bytes 42..45
+  // is decided by the frame length, not a version byte: 46 bytes carries the
+  // new uptime/next-seq pair, 43 bytes is old firmware's single outage_unsent.
+  if (bytes.length >= 46) {
+    result.uptime_min    = (bytes[42] << 8) | bytes[43];
+    result.anchor_seq    = (bytes[44] << 8) | bytes[45];
+    result.outage_unsent = result.buffer_unsent;
+  } else if (bytes.length >= 43) {
+    result.outage_unsent = bytes[42];
+  }
+
+  return result;
+}
+
+// Port 3 (stored readings): readings stored in EEPROM during energy sag or link outage.
+// Layout:
+//   [0]    format version: 0x01..0x03 legacy, 0x04..0x07 current
+//            0x04 same-boot sag, 0x05 same-boot outage,
+//            0x06 cross-boot sag, 0x07 cross-boot outage
+//   [1]    sending boot id  uint8
+//   [2-3]  sender uptime    uint16  minutes since that boot
+//   [4-5]  first seq        uint16  sequence number of record 0
+//   [6]    count n          uint8
+//   [7]    stored interval  uint8   minutes between stored readings (0x02+)
+//   then n records of 11 bytes: 9 bytes telemetry + 2 bytes record time/age
+//     v4..v7: record time  uint16, 0xFF00..0xFFFF = unknown
+//     v1..v3: age_min      uint16, 0xFFFF = unknown
+function decodeStored(bytes) {
+  var result = { type: "stored", valid_frame: false, records: [] };
+  if (bytes.length < 7) return result;                 // smallest header is 0x01
+  var ver = bytes[0];
+  if (ver < 0x01 || ver > 0x07) return result;         // 0x01..0x03 legacy, 0x04..0x07 new
+  var hdr = (ver === 0x01) ? 7 : 8;
+  if (bytes.length < hdr) return result;
+  var n = bytes[6];
+  if (n === 0) return result;
+  if (bytes.length < hdr + n * 11) return result;
+
+  result.valid_frame = true;
+  result.frame_version = ver;
+  result.stored_regime = (ver === 0x03 || ver === 0x05 || ver === 0x07) ? "outage" : "energy_sag";
+  if (hdr === 8) {
+    result.stored_interval_min = bytes[7];
+    result.sag_interval_min = bytes[7];
+  }
+  result.boot_id = bytes[1];
+  result.sender_uptime_min = (bytes[2] << 8) | bytes[3];
+  var first = (bytes[4] << 8) | bytes[5];
+  result.first_seq = first;
+
+  for (var i = 0; i < n; i++) {
+    var off = hdr + i * 11;
+    var rec = decodeSensor(bytes.slice(off, off + 9));
+    var rawTime = (bytes[off + 9] << 8) | bytes[off + 10];
+    rec.seq = (first + i) % 0xFF00;
+    if (ver >= 0x04) {
+      rec.rec_t_min = (rawTime >= 0xFF00) ? null : rawTime;
+      rec.age_min = ((ver === 0x04 || ver === 0x05) && rec.rec_t_min !== null)
+        ? Math.max(0, result.sender_uptime_min - rec.rec_t_min)
+        : null;
+    } else {
+      rec.rec_t_min = null;
+      rec.age_min = (rawTime === 0xFFFF) ? null : rawTime;
+    }
+    result.records.push(rec);
+  }
+
+  // Flat copy of the records for the ThingsBoard gateway connector, which maps
+  // scalar fields only (an array does not survive it). One record per ';',
+  // nine comma-separated fields:
+  //   seq,age_min,temp_C,hum_pct,dust_adc,gas_adc,batt_adc,vmask,rec_t_min
+  // Empty field = unknown / invalid. vmask bits: 1 dht22, 2 dust, 4 gas, 8 battery.
+  var parts = [];
+  for (var k = 0; k < result.records.length; k++) {
+    var r = result.records[k];
+    var vmask = (r.dht22_valid ? 1 : 0) | (r.dust_valid ? 2 : 0) |
+                (r.gas_valid ? 4 : 0)   | (r.battery_valid ? 8 : 0);
+    parts.push([
+      r.seq,
+      r.age_min === null ? "" : r.age_min,
+      r.temperature === null ? "" : r.temperature,
+      r.humidity === null ? "" : r.humidity,
+      r.dust_adc,
+      r.gas_adc,
+      r.battery_adc,
+      vmask,
+      r.rec_t_min === null ? "" : r.rec_t_min
+    ].join(","));
+  }
+  result.records_csv = parts.join(";");
+  result.record_count = result.records.length;
+  return result;
+}
+
+function Decoder(bytes, port) {
+  if (port === 2) return decodeStatus(bytes);
+  if (port === 3) return decodeStored(bytes);
+
+  var out = decodeSensor(bytes);
+  if (out && bytes.length >= 14) {
+    out.p1_boot_id    = bytes[9];
+    out.reading_seq   = (bytes[10] << 8) | bytes[11];
+    out.p1_uptime_min = (bytes[12] << 8) | bytes[13];
+  }
+  return out;
+}

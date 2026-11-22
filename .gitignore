@@ -1,23 +1,52 @@
-# Ignore object files
+# Local workspace / personal notes / agent metadata
+AGENTS.md
+.claude/
+history.txt
+thingsboard_presync_backup_2026-08-10/
+**/*Handoff*.md
+**/*handoff*.md
+
+# Discarded folders
+discard/
+Arduino/discard/
+
+# Gateway live directory and older zips: track ONLY the sanitized public installer zip
+lora_gateway/
+*.zip
+!loragateway/lora_gateway-github-py3-20261119.zip
+*.deb
+
+# Secrets, device keys, and shell completions
+Arduino/CREDENTIALS_REFERENCE.md
+Arduino/.ttn-lw-cli.yml
+**/credentials.h
+Arduino/ttn-lw-cli-autocomplete
+
+# Private calibration, bench, debug, and characterization sketches
+Arduino/Battery_Voltage_Debug/
+Arduino/Bench_DeepSleep_Runtime/
+Arduino/CO_Sensor_Bench_Mega/
+Arduino/EEPROM_Full_Clear/
+Arduino/Enhanced_Lora_DS18B20-MQ9_*/
+Arduino/GP2Y_Debug/
+Arduino/Millis_Diag_*/
+Arduino/PMOS_LoadSwitch_Debug/
+Arduino/SmartGated_SensorDebug/
+
+# WIP sketches kept locally but excluded from git
+Arduino/MCCI_ttn_Raw_DHT22_Dust_Gas_SmartGated_ClassC_uy1_mega_1/
+Arduino/*OTAA*/
+Arduino/*otaa*/
+Arduino/*bench_uy1_mega_1*/
+
+# Build artifacts, backups, and raw archives
+*.before-*
+*.bak*
+*.hex
+*.elf
+*.eep
+*.bin
 *.o
-*.obj
-
-# Ignore compiled executables
-*.exe
-*.out
-a.out
-
-# Ignore compiled Python files
 *.pyc
 __pycache__/
-
-# Ignore editor swap files
-*~
-*.swp
-
-# Ignore environment files
-.env
-venv/
-
-# Ignore log files
-*.log
+*.rar

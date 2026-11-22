@@ -1,0 +1,230 @@
+function encodeDownlink(input) {
+  var data = input.data || {};
+  var cmd = "";
+
+  // Priority: reset > restart > save_eeprom > mode > tx > burst > ping > sleep >
+  // interval > flush_spacing > sf > tx_power > gas_warmup > ping_ratio >
+  // sensor_mask > battery_thresholds > commit > night_* > channel — each field is
+  // independent, so this order only matters if a caller sends more than one at once.
+  if (data.reset === true) {
+    cmd = "/@Z#";
+  }
+  else if (data.restart === true) {
+    cmd = "/@R#";
+  }
+  else if (data.save_eeprom === true) {
+    cmd = "/@E#";
+  }
+  else if (data.mode !== undefined) {
+    var mode = Number(data.mode);
+    if (isNaN(mode) || mode < 0 || mode > 2) {
+      return { errors: ["Invalid mode (0=NORMAL, 1=NORMAL_NO_GAS, 2=ALWAYS_ON)"] };
+    }
+    cmd = "/@M" + mode + "#";
+  }
+  else if (data.tx_now === true || data.txNow === true) {
+    cmd = "/@T#";
+  }
+  else if (data.burst !== undefined) {
+    if (data.burst === true) {
+      cmd = "/@B#";  // default 9 frames / 90s, filled in on-device
+    } else {
+      var burstCount = Number(data.burst.count);
+      var burstInterval = Number(data.burst.interval);
+      if (isNaN(burstCount) || burstCount < 1 || burstCount > 250) {
+        return { errors: ["Invalid burst.count (1-250)"] };
+      }
+      if (isNaN(burstInterval) || burstInterval < 30 || burstInterval > 3600) {
+        return { errors: ["Invalid burst.interval (30-3600s)"] };
+      }
+      cmd = "/@B" + burstCount + "," + burstInterval + "#";
+    }
+  }
+  else if (data.ping === true) {
+    cmd = "/@P#";
+  }
+  else if (data.sleep !== undefined) {
+    var sleepMin = Number(data.sleep);
+    if (isNaN(sleepMin) || sleepMin < 1) {
+      return { errors: ["Invalid sleep value"] };
+    }
+    cmd = "/@S" + sleepMin + "#";
+  }
+  else if (data.interval !== undefined) {
+    var interval = Number(data.interval);
+    if (isNaN(interval) || interval < 30) {
+      return { errors: ["Invalid interval (min 30s)"] };
+    }
+    cmd = "/@I" + interval + "#";
+  }
+  else if (data.flush_spacing !== undefined) {
+    var fs = Number(data.flush_spacing);
+    if (isNaN(fs) || fs < 15 || fs > 3600) {
+      return { errors: ["Invalid flush_spacing (15-3600s)"] };
+    }
+    cmd = "/@G" + fs + "#";
+  }
+  else if (data.sf !== undefined) {
+  var sf = Number(data.sf);
+  if (sf < 7 || sf > 12) return { errors: ["Invalid SF"] };
+  cmd = "/@F" + sf + "#";
+  }
+  else if (data.tx_power !== undefined) {
+    var p = Number(data.tx_power);
+    if (p < 2 || p > 20) return { errors: ["Invalid TX power"] };
+    cmd = "/@X" + p + "#";
+  }
+  else if (data.gas_warmup !== undefined) {
+    var warmup = Number(data.gas_warmup);
+    if (isNaN(warmup) || warmup < 10 || warmup > 3600) {
+      return { errors: ["Invalid gas_warmup (10-3600s)"] };
+    }
+    cmd = "/@W" + warmup + "#";
+  }
+  else if (data.ping_ratio !== undefined) {
+    var ratio = Number(data.ping_ratio);
+    if (isNaN(ratio) || ratio < 1 || ratio > 250) {
+      return { errors: ["Invalid ping_ratio (1-250)"] };
+    }
+    cmd = "/@N" + ratio + "#";
+  }
+  else if (data.sensor_mask !== undefined) {
+    var mask = Number(data.sensor_mask);
+    if (isNaN(mask) || mask < 0 || mask > 0x0F) {
+      return { errors: ["Invalid sensor_mask (0x0-0xF, bit0=DHT22 bit1=dust bit2=gas bit3=battery)"] };
+    }
+    var maskHex = mask.toString(16).toUpperCase();
+    if (maskHex.length < 2) maskHex = "0" + maskHex;
+    cmd = "/@K" + maskHex + "#";
+  }
+  else if (data.battery_thresholds !== undefined) {
+    var bt = data.battery_thresholds;
+    var low = Number(bt.low), rec = Number(bt.recover), crit = Number(bt.critical),
+        psave = Number(bt.psave), psaveRec = Number(bt.psave_recover);
+    var inRange = [low, rec, crit, psave, psaveRec].every(function (v) {
+      return !isNaN(v) && v > 5 && v < 440;
+    });
+    if (!inRange) {
+      return { errors: ["Invalid battery_thresholds - each of low/recover/critical/psave/psave_recover must be 6-439"] };
+    }
+    if (!(crit < low && low < psave && psave < rec && rec <= psaveRec)) {
+      return { errors: ["Invalid battery_thresholds ordering - must satisfy critical < low < psave < recover <= psave_recover"] };
+    }
+    cmd = "/@V" + low + "," + rec + "," + crit + "," + psave + "," + psaveRec + "#";
+  }
+  else if (data.commit === true) {
+    cmd = "/@CP#";
+  }
+  else if (data.sag_thresholds !== undefined || data.night_thresholds !== undefined) {
+    // /@H<enter>,<exit># - STORAGE battery strategy builds only
+    var nt = data.sag_thresholds !== undefined ? data.sag_thresholds : data.night_thresholds;
+    var nEnter = Number(nt.enter), nExit = Number(nt.exit);
+    if (isNaN(nEnter) || isNaN(nExit) || nEnter < 6 || nExit > 439 || nExit < nEnter + 4) {
+      return { errors: ["Invalid sag_thresholds - enter >= 6, exit <= 439 and exit >= enter + 4 (raw ADC)"] };
+    }
+    cmd = "/@H" + nEnter + "," + nExit + "#";
+  }
+  else if (data.sag_interval !== undefined || data.night_interval !== undefined) {
+    var nInt = Number(data.sag_interval !== undefined ? data.sag_interval : data.night_interval);
+    if (isNaN(nInt) || nInt < 30 || nInt > 14400) {
+      return { errors: ["Invalid sag_interval (30-14400 s)"] };
+    }
+    cmd = "/@L" + nInt + "#";
+  }
+  else if (data.sag_override !== undefined || data.night_override !== undefined) {
+    var nOvr = Number(data.sag_override !== undefined ? data.sag_override : data.night_override);
+    if (isNaN(nOvr) || nOvr < 0 || nOvr > 2) {
+      return { errors: ["Invalid sag_override (0=force off, 1=force on, 2=automatic)"] };
+    }
+    cmd = "/@O" + nOvr + "#";
+  }
+  else if (data.buffer_resend !== undefined || data.night_resend !== undefined) {
+    var nSeq = Number(data.buffer_resend !== undefined ? data.buffer_resend : data.night_resend);
+    if (isNaN(nSeq) || nSeq < 0 || nSeq > 65534) {
+      return { errors: ["Invalid buffer_resend (sequence number 0-65534)"] };
+    }
+    cmd = "/@U" + nSeq + "#";
+  }
+  else if (data.buffer_discard !== undefined || data.night_discard !== undefined) {
+    cmd = "/@D#";
+  }
+  else if (data.channel !== undefined) {
+    var channel = Number(data.channel);
+    if (isNaN(channel) || channel < 0 || channel > 8) {
+      return { errors: ["Invalid channel (0-8, EU868)"] };
+    }
+    cmd = "/@C" + channel + "#";
+  }
+  else {
+    return { errors: ["Unknown command: use interval, flush_spacing, sleep, tx_now, burst, ping, restart, reset, save_eeprom, sf, tx_power, mode, gas_warmup, ping_ratio, sensor_mask, battery_thresholds, commit, channel, sag_thresholds, sag_interval, sag_override, buffer_resend, buffer_discard"] };
+  }
+
+  // Convert string → bytes safely
+  var bytes = [];
+  for (var i = 0; i < cmd.length; i++) {
+    bytes.push(cmd.charCodeAt(i));
+  }
+
+  return {
+    bytes: bytes,
+    fPort: 1
+  };
+}
+
+function decodeDownlink(input) {
+  var bytes = input.bytes || [];
+  var str = "";
+
+  for (var i = 0; i < bytes.length; i++) {
+    str += String.fromCharCode(bytes[i]);
+  }
+
+  return {
+    data: {
+      raw: str
+    }
+  };
+}
+
+// {"interval": 60}   // set uplink period (seconds, min 30)
+// {"flush_spacing": 300} // /@G — gap between Port 3 batches in a drain, seconds (15-3600, default 300)
+// {"sleep": 5}       // sleep device (minutes, max 120)
+// {"tx_now": true}   // force immediate uplink
+// {"txNow": true}    // same as tx_now (alias)
+// {"burst": true}    // start a burst at the default 9 frames / 90s spacing
+// {"burst": {"count": 20, "interval": 30}}  // parameterized burst (count 1-250, interval 30-3600s);
+//                     // under 90s has caused mid-burst brownouts on solar-only power
+// {"ping": true}     // request status packet (port 2)
+// {"restart": true}   // software reboot (watchdog reset)
+// {"reset": true}    // factory reset (EEPROM clear + reboot)
+// {"save_eeprom": true} // force an immediate EEPROM save (normally batched every 20 uplinks)
+// {"tx_power": 14}    // set TX power in dBm (typical usable range: 2–14)
+// {"sf": 7}           // set LoRaWAN spreading factor (7=SF7 ... 12=SF12)
+// {"mode": 0}         // switch operating mode: 0=NORMAL, 1=NORMAL_NO_GAS, 2=ALWAYS_ON
+//                      // RAM-only unless followed by {"commit": true}: reverts to the
+//                      // last *committed* mode (or NORMAL if none) on any reset.
+//                      // ALWAYS_ON is never committed — saved as NORMAL instead.
+// {"gas_warmup": 120}         // gas sensor warmup threshold, seconds (10-3600, default 300)
+// {"ping_ratio": 10}          // send a status frame every N successful uplinks (1-250, default 10)
+// {"sensor_mask": 14}         // bitmask, bit0=DHT22 bit1=dust bit2=gas bit3=battery, 1=read enabled
+//                              // e.g. 14 (0x0E) drops DHT22, keeps dust/gas/battery
+// {"battery_thresholds": {"low": 335, "recover": 360, "critical": 315, "psave": 350, "psave_recover": 380}}
+//                              // each 6-439 (raw ADC), must satisfy critical < low < psave < recover <= psave_recover
+// {"commit": true}            // /@CP# — commit current mode/sensor_mask/gas_warmup/ping_ratio/
+//                              // battery_thresholds to EEPROM so they survive a reset
+// {"channel": 3}               // retarget the single locked LoRaWAN channel, EU868 index 0-8
+//                               // (§3.6, Field_Diagnostics_And_Remote_Configuration_2026-09-07.md)
+//                               // verified via confirmed ping like sf/tx_power (§3.8): ACK commits
+//                               // to EEPROM, no ACK reverts to the last known-good channel
+// gas_warmup/ping_ratio/sensor_mask/battery_thresholds are RAM-only until an explicit
+// {"commit": true} is sent (§3.5). sf/tx_power are different — they auto-commit to EEPROM
+// once §3.8's radio-verify-via-ping confirms the new value actually took; {"commit": true}
+// doesn't touch them. channel (§3.6) is RAM-only with no commit path at all yet — not
+// wired into either mechanism — so it always resets to the compiled-in default on reboot.
+// NIGHT battery strategy builds only (BATTERY_STRATEGY_NIGHT); other builds answer "Unknown command" and ignore these:
+// {"night_thresholds": {"enter": 375, "exit": 388}}  // /@H - store below enter, resume at or above exit on 2 reads
+//                               // (raw ADC 6-439, exit >= enter + 4). RAM-only until {"commit": true}
+// {"night_interval": 3600}     // /@L - reading interval while storing, seconds (30-14400). RAM-only until commit
+// {"night_override": 1}        // /@O - 0 = force night off, 1 = force night on, 2 = automatic. RAM-only
+// {"night_discard": true}     // /@D - mark every unsent saved record as sent WITHOUT transmitting (drops stale records)
+// {"night_resend": 120}        // /@U - mark saved records from this sequence number on as unsent; re-sent after the next uplink

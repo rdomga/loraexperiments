@@ -1,0 +1,23 @@
+[
+  {"key": "battery_strategy",   "type": "string",  "value": "${uplink_message.decoded_payload.battery_strategy}"},
+  {"key": "night_active",       "type": "boolean", "value": "${uplink_message.decoded_payload.night_active}"},
+  {"key": "critical_floor",     "type": "boolean", "value": "${uplink_message.decoded_payload.critical_floor}"},
+  {"key": "ladder_low",         "type": "boolean", "value": "${uplink_message.decoded_payload.ladder_low}"},
+  {"key": "ladder_powersave",   "type": "boolean", "value": "${uplink_message.decoded_payload.ladder_powersave}"},
+  {"key": "night_exit_pending", "type": "boolean", "value": "${uplink_message.decoded_payload.night_exit_pending}"},
+  {"key": "night_enter_adc",    "type": "integer", "value": "${uplink_message.decoded_payload.night_enter_adc}"},
+  {"key": "night_exit_adc",     "type": "integer", "value": "${uplink_message.decoded_payload.night_exit_adc}"},
+  {"key": "night_interval_min", "type": "integer", "value": "${uplink_message.decoded_payload.night_interval_min}"},
+  {"key": "night_unsent",       "type": "integer", "value": "${uplink_message.decoded_payload.night_unsent}"},
+  {"key": "node_boot_id",            "type": "integer", "value": "${uplink_message.decoded_payload.node_boot_id}"},
+  {"key": "night_last_start_ago_min", "type": "integer", "value": "${uplink_message.decoded_payload.night_last_start_ago_min}"},
+  {"key": "night_last_end_ago_min",   "type": "integer", "value": "${uplink_message.decoded_payload.night_last_end_ago_min}"},
+  {"key": "nights_since_boot",        "type": "integer", "value": "${uplink_message.decoded_payload.nights_since_boot}"},
+  {"key": "night_records_lost",       "type": "integer", "value": "${uplink_message.decoded_payload.night_records_lost}"},
+
+  {"key": "stored_csv",         "type": "string",  "value": "${uplink_message.decoded_payload.records_csv}"},
+  {"key": "stored_boot_id",     "type": "integer", "value": "${uplink_message.decoded_payload.boot_id}"},
+  {"key": "stored_first_seq",   "type": "integer", "value": "${uplink_message.decoded_payload.first_seq}"},
+  {"key": "stored_uptime_min",  "type": "integer", "value": "${uplink_message.decoded_payload.sender_uptime_min}"},
+  {"key": "stored_count",       "type": "integer", "value": "${uplink_message.decoded_payload.record_count}"}
+]

@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCCI LMIC Single-Channel Technical Manual</title>
+    <style>
+        :root {
+            --bg: #fafbfc;
+            --card: #ffffff;
+            --accent: #2563eb;
+            --accent-light: #dbeafe;
+            --text: #1e293b;
+            --muted: #64748b;
+            --border: #e2e8f0;
+            --green: #16a34a;
+            --orange: #ea580c;
+            --red: #dc2626;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            line-height: 1.7;
+            color: var(--text);
+            background: var(--bg);
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 { font-size: 1.8rem; color: var(--accent); margin-bottom: .3rem; }
+        .subtitle { color: var(--muted); font-size: .95rem; margin-bottom: 2rem; }
+        h2 {
+            font-size: 1.35rem;
+            color: var(--text);
+            border-left: 4px solid var(--accent);
+            padding-left: .75rem;
+            margin: 2.5rem 0 1rem;
+        }
+        h3 { font-size: 1.05rem; margin: 1.2rem 0 .5rem; color: var(--accent); }
+        h4 { font-size: 1rem; margin: 1rem 0 .5rem; color: var(--text); }
+
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; margin: .75rem 0 1.5rem; font-size: .9rem; }
+        th, td { border: 1px solid var(--border); padding: .55rem .7rem; text-align: left; vertical-align: top; }
+        th { background: var(--accent-light); font-weight: 600; white-space: nowrap; }
+        tr:nth-child(even) { background: #f8fafc; }
+
+        ul, ol { padding-left: 1.3rem; margin: .5rem 0; }
+        li { margin-bottom: .25rem; }
+        a { color: var(--accent); }
+        strong { font-weight: 600; }
+        em { color: var(--muted); }
+        
+        pre { background: var(--card); padding: 1rem; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; margin: 1rem 0;}
+        code { background: var(--accent-light); padding: 0.1rem 0.3rem; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+        pre code { background: transparent; padding: 0; }
+        
+        blockquote { border-left: 4px solid var(--accent); padding-left: 1rem; margin: 1rem 0; color: var(--muted); background: #eff6ff; border-radius: 0 6px 6px 0; padding: .7rem 1rem;}
+
+        /* Revision-note callout for the v1.1 correction block */
+        h2#revision-note-v1.1-july-2026 { border-left-color: var(--orange); }
+    </style>
+</head>
+<body>
+<p><strong>MCCI LoRaWAN LMIC Library</strong><br />
+<strong>Modifications Catalog for Single-Channel Operation</strong></p>
+<p>Technical Manual — Version 1.2</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Project</th>
+<th style="text-align: left;">Project 3 - Master’s 1 Research Project</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Institution</strong></td>
+<td style="text-align: left;">University of Yaoundé 1</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Department</strong></td>
+<td style="text-align: left;">Department of Computer Sciences</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Author</strong></td>
+<td style="text-align: left;">KOUEGA YOUMBI (M2 Researcher)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Academic Year</strong></td>
+<td style="text-align: left;">2025-2026</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Version</strong></td>
+<td style="text-align: left;">1.2</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Date</strong></td>
+<td style="text-align: left;">July 2026 (originally April 2026)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="revision-note-v1.2-july-2026"><strong>Revision Note — v1.2 (July 2026)</strong></h2>
+<p>The v1.1 countermeasure for Threat 1.4 (<code>DISABLE_MCMD_NewChannelReq</code>) has been reverted after field testing showed it breaks MAC command parsing. Root cause, confirmed at the source level: <code>macCmdSize[]</code> in <code>lmic.c</code> still lists <code>NewChannelReq</code> as a 6-byte command regardless of this define — it is not conditionally compiled — so the FOpts parser correctly walks up to the opcode, finds no matching <code>case</code> in the <code>switch</code> (that part <em>is</em> compiled out), and falls into <code>default:</code>, which does <code>olen = oidx; break;</code> — aborting the rest of the MAC command scan. No <code>NewChannelAns</code> is ever queued, so TTN never receives an acknowledgment and re-sends the same <code>NewChannelReq</code> on every subsequent downlink indefinitely. This was observed directly: <code>error processing mac commands for port 0 (len=0x1e, optendindex=0x6)</code> on every RX1 window, with downlinks arriving continuously.</p>
+<p>The fix has moved into <code>SCG_enforce()</code> itself: it now unconditionally re-disables every non-<code>SCG_CHANNEL</code> channel in <code>LMIC.channelMap</code> on every tick (<code>LMIC_disableChannel()</code> is a couple of field writes — negligible cost), rather than only reacting after <code>txChnl</code>/<code>datarate</code> have already drifted. This closes the actual blind spot identified in §10.3 directly, lets the device answer <code>NewChannelReq</code> normally, and was field-confirmed (second capture, 2026-07-23) to stop both the wrong-channel TX and the downlink retry storm in the same test run — see Threat 1.4 for both log captures and §8.6 for the updated <code>SCG_enforce()</code> source.</p>
+<h2 id="revision-note-v1.1-july-2026"><strong>Revision Note — v1.1 (July 2026)</strong></h2>
+<p>Section 8 of v1.0 documented an <code>SCG_apply()</code>-based design (a shared helper checking five LMIC state fields) that was never actually implemented in the shipped <code>single_channel_lmic.h</code>. The deployed header is simpler: <code>SCG_enforce()</code> checks only <code>txChnl</code> and <code>datarate</code>, has no <code>SCG_apply()</code> helper, and <code>SCG_on_joined()</code> does not re-assert <code>dn2Dr</code>/<code>dn2Freq</code>. Section 8 below has been rewritten to match the code that actually ships, not the originally-intended design.</p>
+<p>Separately, field testing on an ABP deployment (<code>MCCI_ttn_Raw_DHT22_Dust_MQ9_AlwaysOn</code>, TTN v3 EU868, 2026-07-23) produced a <strong>live, confirmed wrong-channel transmission</strong> — not the theoretical “one-tick window” described in v1.0, but an actual frame sent on 867.3 MHz from a debug log capture. This traces to a threat category v1.0 did not catalog at all: <code>NewChannelReq</code> re-enabling a disabled channel in <code>LMIC.channelMap</code>. This is now Threat 1.4. It also means the risk argument in §6.4 point 2 and §10.1 (“the window is real; the risk is not”) was wrong for at least this trigger path — see the correction inline in both sections. <strong>(Superseded by v1.2 above — the countermeasure described here was reverted.)</strong></p>
+<h1 id="abstract"><strong>1. Abstract</strong></h1>
+<p>This document is the technical manual produced by Project 3 of the Masters 1 research program at the University of Yaoundé 1, Department of Computer Sciences. The project systematically catalogs every behavior of the MCCI LoRaWAN LMIC library that conflicts with single-channel gateway operation, quantifies the risk of each behavior, and proposes two complementary solutions: a formal library-side patch architecture centered on a LMIC_SINGLE_CHANNEL_GATEWAY preprocessor flag, and a library-update-safe user-space enforcement layer (the SingleChannelLMIC header library).</p>
+<p>The MCCI LMIC library is designed for multi-channel LoRaWAN networks and contains twelve identified code paths that either actively rotate transmission channels, renegotiate data rates, or introduce new channels in response to network MAC commands. Each path is documented with its source location, trigger condition, observable consequence on single-channel gateways, and recommended countermeasure.</p>
+<p>The user-space approach, implemented as the SingleChannelLMIC Arduino library, is the recommended solution for most deployments due to its robustness against library updates. The formal library patch proposal is documented as a contribution to the upstream MCCI project and as a reference for researchers who require a zero-overhead enforcement path.</p>
+<h1 id="table-of-contents"><strong>2. Table of Contents</strong></h1>
+<p><strong>1.</strong> Abstract</p>
+<p><strong>2.</strong> Table of Contents</p>
+<p><strong>3.</strong> Introduction</p>
+<p><strong>3.1</strong> Motivation and Context</p>
+<p><strong>3.2</strong> Project Objectives</p>
+<p><strong>3.3</strong> Hardware Stack</p>
+<p><strong>3.4</strong> Document Scope</p>
+<p><strong>4.</strong> MCCI LMIC Architecture Overview</p>
+<p><strong>4.1</strong> Relevant Internal Data Structures</p>
+<p><strong>4.2</strong> Key Functions Involved in Channel and DR Management</p>
+<p><strong>5.</strong> Threat Catalog</p>
+<p><strong>5.1</strong> Category 1 — Channel Selection Threats</p>
+<p><strong>5.2</strong> Category 2 — Data Rate Threats</p>
+<p><strong>5.3</strong> Category 3 — Join Procedure Threats</p>
+<p><strong>5.4</strong> Category 4 — MAC Command Threats</p>
+<p><strong>5.5</strong> Category 5 — RX Window Threats</p>
+<p><strong>5.6</strong> Threat Summary Table</p>
+<p><strong>6.</strong> Approach Comparison</p>
+<p><strong>6.1</strong> Approach A — Library-Side Patches</p>
+<p><strong>6.2</strong> Approach B — User-Space Enforcement (SingleChannelLMIC)</p>
+<p><strong>6.3</strong> Comparison Table</p>
+<p><strong>6.4</strong> Recommendation and Argument</p>
+<p><strong>7.</strong> Formal LMIC_SINGLE_CHANNEL_GATEWAY Proposal</p>
+<p><strong>7.1</strong> Motivation</p>
+<p><strong>7.2</strong> Proposed Preprocessor Interface</p>
+<p><strong>7.3</strong> Required Library Changes</p>
+<p><strong>7.4</strong> Risk Assessment</p>
+<p><strong>8.</strong> SingleChannelLMIC Library Design</p>
+<p><strong>8.1</strong> Architecture Principles</p>
+<p><strong>8.2</strong> Configuration System</p>
+<p><strong>8.3</strong> SCG_init()</p>
+<p><strong>8.4</strong> SCG_on_joined()</p>
+<p><strong>8.5</strong> SCG_on_join_txcomplete()</p>
+<p><strong>8.6</strong> SCG_enforce()</p>
+<p><strong>9.</strong> Sketch Migration Guide</p>
+<p><strong>9.1</strong> ABP Migration</p>
+<p><strong>9.2</strong> OTAA Migration</p>
+<p><strong>9.3</strong> Variable-DR (Characterization) Special Case</p>
+<p><strong>10.</strong> Known Limitations</p>
+<p><strong>11.</strong> Conclusions and Recommendations</p>
+<p><strong>12.</strong> Appendix A — Complete Threat Reference Table</p>
+<p><strong>13.</strong> Appendix B — Sketch Inventory</p>
+<h1 id="introduction"><strong>3. Introduction</strong></h1>
+<h2 id="motivation-and-context"><strong>3.1 Motivation and Context</strong></h2>
+<p>LoRaWAN networks are typically served by multi-channel gateways that receive and transmit on eight or more channels simultaneously. The end-device stack — in this project, the MCCI LoRaWAN LMIC library — is designed with this assumption baked in. It implements frequency hopping, adaptive data rate (ADR), join channel rotation, and dynamic channel addition through MAC commands, all of which assume that the gateway is listening on multiple channels at the same moment.</p>
+<p>In developing regions and low-budget research deployments, full commercial gateways (USD 150–400) are often replaced by single-channel gateways based on a Raspberry Pi and an SX1276 LoRa module. These gateways cost USD 15–30, represent 10–20% of the cost of commercial alternatives, and are sufficient for small-scale, fixed-node sensor networks. However, they can only listen on one frequency at a time. Any frame transmitted by the end device on a channel other than the one the gateway is monitoring is silently lost.</p>
+<p>The MCCI LMIC library contains twelve identified behaviors that cause the end device to transmit on channels other than the intended single channel, or to use data rates incompatible with the gateway configuration. This project catalogs all such behaviors, maps their source locations in the MCCI library, and proposes both a library-level fix and a library-update-safe user-space fix.</p>
+<h2 id="project-objectives"><strong>3.2 Project Objectives</strong></h2>
+<ol type="1">
+<li>Systematically audit the MCCI LMIC library source to identify all code paths that modify the transmission channel, data rate, or RX window parameters.<br />
+</li>
+<li>Classify each identified behavior by threat level (Critical / High / Medium / Low) based on whether it causes immediate frame loss or degraded reliability.<br />
+</li>
+<li>Propose a formal library-side patch centered on a #define LMIC_SINGLE_CHANNEL_GATEWAY preprocessor flag, documenting every required change at source level.<br />
+</li>
+<li>Design and implement a user-space alternative (SingleChannelLMIC Arduino library) that provides equivalent protection without modifying the MCCI library source.<br />
+</li>
+<li>Apply the user-space enforcement to a set of sensor sketches used in the research deployment.<br />
+</li>
+<li>Document the trade-offs between the two approaches and provide a reasoned recommendation.</li>
+</ol>
+<h2 id="hardware-stack"><strong>3.3 Hardware Stack</strong></h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Component</th>
+<th style="text-align: left;">Model</th>
+<th style="text-align: left;">Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Gateway SBC</td>
+<td style="text-align: left;">Raspberry Pi 3B+</td>
+<td style="text-align: left;">Single-channel LoRaWAN gateway host</td>
+</tr>
+<tr>
+<td style="text-align: left;">Gateway Radio</td>
+<td style="text-align: left;">SX1276 breakout board</td>
+<td style="text-align: left;">LoRa transceiver, 868.1 MHz, SF7</td>
+</tr>
+<tr>
+<td style="text-align: left;">Gateway Software</td>
+<td style="text-align: left;">Congduc Pham low-cost gateway</td>
+<td style="text-align: left;">Packet forwarder to TTN v3</td>
+</tr>
+<tr>
+<td style="text-align: left;">End-device MCU</td>
+<td style="text-align: left;">Arduino Mega 2560</td>
+<td style="text-align: left;">Sketch execution, sensor reading</td>
+</tr>
+<tr>
+<td style="text-align: left;">End-device Radio</td>
+<td style="text-align: left;">Dragino LoRa Shield v1.4</td>
+<td style="text-align: left;">SX1276 on SPI, pins NSS=10 RST=9 DIO0=2</td>
+</tr>
+<tr>
+<td style="text-align: left;">LoRa Library</td>
+<td style="text-align: left;">MCCI LoRaWAN LMIC (catena)</td>
+<td style="text-align: left;">LoRaWAN stack implementation</td>
+</tr>
+<tr>
+<td style="text-align: left;">Network Server</td>
+<td style="text-align: left;">TTN v3 (EU868)</td>
+<td style="text-align: left;">Cloud LoRaWAN network server</td>
+</tr>
+</tbody>
+</table>
+<h2 id="document-scope"><strong>3.4 Document Scope</strong></h2>
+<p>This manual covers the EU868 band configuration exclusively. US915, AS923, and other regions share many of the same internal mechanisms, and the user-space library is parameterized to support them via the SCG_NUM_CHANNELS and SCG_RX2_DR configuration defines, but the threat analysis, source code references, and examples in this document are written for EU868.</p>
+<p>The document does not cover the Congduc Pham gateway software or TTN v3 server-side configuration. It is focused entirely on the MCCI LMIC end-device library and the changes needed at the sketch and library level to achieve reliable single-channel operation.</p>
+<h1 id="mcci-lmic-architecture-overview"><strong>4. MCCI LMIC Architecture Overview</strong></h1>
+<h2 id="relevant-internal-data-structures"><strong>4.1 Relevant Internal Data Structures</strong></h2>
+<p>The MCCI LMIC library maintains a global struct named LMIC (type lmic_t) that holds all protocol state. The fields most relevant to single-channel enforcement are:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Field</th>
+<th style="text-align: left;">Type</th>
+<th style="text-align: left;">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">LMIC.txChnl</td>
+<td style="text-align: left;">u1_t</td>
+<td style="text-align: left;">Index of the channel selected for the next transmission. Set by LMIC_findNextChannel().</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.channelMap</td>
+<td style="text-align: left;">u2_t</td>
+<td style="text-align: left;">Bitmask of enabled channels. Bit N is set if channel N is enabled. LMIC_disableChannel() clears the bit.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.channelShuffleMap</td>
+<td style="text-align: left;">u2_t</td>
+<td style="text-align: left;">Working copy of channelMap used by LMIC_findNextChannel() to cycle through enabled channels without repetition. Reset to channelMap when exhausted.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.datarate</td>
+<td style="text-align: left;">u1_t</td>
+<td style="text-align: left;">Current data rate (spreading factor). DR_SF7 = 5 in EU868. Set by LMIC_setDrTxpow() or directly by the ADR and join mechanisms.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.txpow</td>
+<td style="text-align: left;">s1_t</td>
+<td style="text-align: left;">Current TX power in dBm. Set by LMIC_setDrTxpow().</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.dn2Dr</td>
+<td style="text-align: left;">u1_t</td>
+<td style="text-align: left;">Data rate for the RX2 receive window.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.dn2Freq</td>
+<td style="text-align: left;">u4_t</td>
+<td style="text-align: left;">Frequency for the RX2 receive window in Hz.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.channelDlFreq[]</td>
+<td style="text-align: left;">u4_t[]</td>
+<td style="text-align: left;">Per-channel downlink frequency override, set by DlChannelReq MAC command. Non-zero redirects the RX1 window to a different frequency.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC.opmode</td>
+<td style="text-align: left;">u2_t</td>
+<td style="text-align: left;">Bitmask of current operation mode flags. OP_TXRXPEND, OP_NEXTCHNL, OP_JOINING, etc.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-functions-involved-in-channel-and-dr-management"><strong>4.2 Key Functions Involved in Channel and DR Management</strong></h2>
+<p>The following functions in the MCCI library source are the primary actors in channel and data rate management. Understanding them is necessary to evaluate the threat catalog in Section 5.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Function</th>
+<th style="text-align: left;">Source File</th>
+<th style="text-align: left;">Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">LMIC_findNextChannel()</td>
+<td style="text-align: left;">lmic_channelshuffle.c</td>
+<td style="text-align: left;">Selects txChnl from channelShuffleMap. Called before every TX.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMICeulike_initJoinLoop()</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">Initializes the join procedure. Sets channelShuffleMap = 0x0007 (channels 0-2) regardless of channelMap.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMICeulike_nextJoinState()</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">Called after each join TX. Advances to the next join channel and applies DR backoff after each full cycle.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMICeulike_mapChannels()</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">Applies a LinkAdrReq MAC command to channelMap and datarate. May re-enable disabled channels.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMICeulike_processJoinAcceptCFList()</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">Parses a CFList from the Join Accept frame. Adds up to 5 new channels to channelMap.</td>
+</tr>
+<tr>
+<td style="text-align: left;">applyAdrRequests()</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">Applies ADR adjustments from network downlinks. May change datarate and channel mask even with ADR mode disabled.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC_setDrTxpow()</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">Public API to set datarate and txpow. Also sets OP_NEXTCHNL, triggering a channel selection on the next tick.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC_disableChannel()</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">Public API to clear a channel bit in channelMap. Does not affect channelShuffleMap directly.</td>
+</tr>
+<tr>
+<td style="text-align: left;">LMIC_setLinkCheckMode()</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">Enables or disables link check validation. If enabled and LINK_CHECK_DEAD fires, triggers a re-join.</td>
+</tr>
+</tbody>
+</table>
+<h1 id="threat-catalog"><strong>5. Threat Catalog</strong></h1>
+<p>This section catalogs all identified behaviors in the MCCI LMIC library that can cause a LoRaWAN end device to deviate from single-channel operation. Each threat is described by its MCCI source location, the condition that triggers it, the observable consequence on a single-channel gateway deployment, and the countermeasure applied.</p>
+<p>Severity levels are defined as follows:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Level</th>
+<th style="text-align: left;">Definition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Critical</td>
+<td style="text-align: left;">Causes immediate, guaranteed frame loss on every affected TX or join attempt.</td>
+</tr>
+<tr>
+<td style="text-align: left;">High</td>
+<td style="text-align: left;">Causes frame loss under normal operating conditions (e.g., after a successful join or a downlink).</td>
+</tr>
+<tr>
+<td style="text-align: left;">Medium</td>
+<td style="text-align: left;">Causes frame loss in specific but common conditions (e.g., after a link-check timeout).</td>
+</tr>
+<tr>
+<td style="text-align: left;">Low</td>
+<td style="text-align: left;">Degrades reliability without causing direct frame loss (e.g., wrong RX2 parameters reduce downlink success rate).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="category-1-channel-selection-threats"><strong>5.1 Category 1 — Channel Selection Threats</strong></h2>
+<h3 id="threat-1.1-lmic_findnextchannel-channel-rotation"><strong>Threat 1.1 — LMIC_findNextChannel() Channel Rotation</strong></h3>
+<p>Source: lmic_channelshuffle.c — LMIC_findNextChannel()</p>
+<p>Trigger: Called before every TX scheduling. Selects txChnl from channelShuffleMap by finding the next set bit, then clears that bit. When channelShuffleMap is exhausted (all bits clear), it is reloaded from channelMap.</p>
+<p>Consequence: If channelMap has more than one bit set (i.e., more than one channel enabled), txChnl will cycle through all enabled channels. On a single-channel gateway monitoring 868.1 MHz, any frame sent on channel 1 (868.3 MHz) or channel 2 (868.5 MHz) is lost. With the default EU868 three-channel setup (channels 0-2), two out of every three join attempts will be lost.</p>
+<p>Severity: Critical — affects every TX when multiple channels are enabled.</p>
+<p>// Countermeasure: lock channelShuffleMap to only one channel<br />
+LMIC_disableChannel(1); // … for all i != SCG_CHANNEL<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL); // lock the working set</p>
+<h3 id="threat-1.2-lmiceulike_initjoinloop-shuffle-map-reset"><strong>Threat 1.2 — LMICeulike_initJoinLoop() Shuffle Map Reset</strong></h3>
+<p>Source: lmic_eu_like.c — LMICeulike_initJoinLoop()</p>
+<p>Trigger: Called at the start of every OTAA join procedure (when LMIC_startJoining() is called or when a re-join is triggered by LINK_CHECK_DEAD). Resets channelShuffleMap = 0x0007 (channels 0, 1, and 2) regardless of the current state of channelMap.</p>
+<p>Consequence: Even if SCG_init() has correctly locked channelShuffleMap = 0x0001, the moment a join attempt starts, the library resets the shuffle map to 0x0007, re-enabling channel rotation for all join transmissions until the application corrects it.</p>
+<p>Severity: Critical — affects every OTAA join attempt.</p>
+<p>// Countermeasure: correct txChnl and channelShuffleMap in EV_JOIN_TXCOMPLETE<br />
+// (fires after each failed join TX, before the next retry is scheduled)<br />
+LMIC.txChnl = SCG_CHANNEL;<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);</p>
+<h3 id="threat-1.3-linkadrreq-channel-map-renegotiation"><strong>Threat 1.3 — LinkAdrReq Channel Map Renegotiation</strong></h3>
+<p>Source: lmic_eu_like.c — LMICeulike_mapChannels()</p>
+<p>Trigger: Called when a LinkAdrReq MAC command is received in a downlink frame, processed inside os_runloop_once() during RX window handling. The network server sends this command to instruct the device to enable or disable specific channels.</p>
+<p>Consequence: LMICeulike_mapChannels() writes directly to channelMap and may re-enable previously disabled channels. On a single-channel gateway, this silently re-enables channels 1-8, causing the next TX to be sent on a channel the gateway is not monitoring. The device will not receive an error — it simply loses the frame.</p>
+<p>Severity: High — occurs after receiving any downlink containing a LinkAdrReq.</p>
+<p>// Countermeasure: SCG_enforce() in loop() catches the re-enabled channels<br />
+// on the next tick after os_runloop_once() processes the downlink.<br />
+if (LMIC.txChnl != SCG_CHANNEL) {<br />
+LMIC.txChnl = SCG_CHANNEL;<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);<br />
+}</p>
+<h3 id="threat-1.4-newchannelreq-channel-re-enable-field-confirmed"><strong>Threat 1.4 — NewChannelReq Channel Re-Enable (field-confirmed)</strong></h3>
+<p>Source: lmic.c — MCMD_NewChannelReq handler (~line 1004), guarded by #if !defined(DISABLE_MCMD_NewChannelReq)</p>
+<p>Trigger: The network server sends a NewChannelReq MAC command — piggybacked in the FOpts of any downlink, including one with zero application payload (LMIC.dataLen can read 0 while FOpts still carries the command). The handler calls LMIC_setupChannel(chidx, freq, DR_RANGE_MAP(MinDR, MaxDR), -1) for whatever channel index and frequency the network names, which sets that channel’s bit in LMIC.channelMap — unconditionally, regardless of any earlier LMIC_disableChannel() call.</p>
+<p>Consequence: The re-enabled channel stays enabled in channelMap indefinitely (until reboot or another explicit disable). Neither the v1.0-documented SCG_apply() design nor the actually-deployed SCG_enforce() ever reads or restores channelMap directly — both only watch channelShuffleMap/txChnl (and, in the deployed version, datarate). So the corruption is invisible until channelShuffleMap is next exhausted and reloads from channelMap — which can happen inside the very same os_runloop_once() call that also dispatches the already-pending TX, i.e. strictly before SCG_enforce() gets another chance to run. This defeats the “TX is always scheduled after the corrective call has run” assumption in §6.4 and §10.1: the corruption and the wrong-channel TX can share a single tick.</p>
+<p>This is not theoretical. Field debug log, ABP node MCCI_ttn_Raw_DHT22_Dust_MQ9_AlwaysOn, TTN v3 EU868, 2026-07-23, LMIC_DEBUG_LEVEL=1:</p>
+<pre><code>1443381: engineUpdate, opmode=0x900  
+Sleeping 27.7s  
+T:28.9C H:68.7% DUST_ADC:70 MQ9_ADC:FAULT BATT_ADC:363 [01 21 89 00 46 FF FF 01 6B]  
+1581834: engineUpdate, opmode=0x908  
+1582957: 1583075: TXMODE, freq=867300000, len=22, SF=7, BW=125, CR=4/5, IH=0  </code></pre>
+<p>867300000 Hz is channel 4 in this sketch’s EU868 setup (LMIC_setupChannel(4, 867300000, …)) — SCG_CHANNEL is 0 (868.1 MHz). This is a live radio transmission on a channel the single-channel gateway does not monitor, on a node whose enforcement layer was active and had not logged any txChnl/datarate drift.</p>
+<p>Severity: <strong>Critical</strong> — the only threat in this catalog with direct field confirmation of a wrong-channel TX escaping the enforcement layer, rather than a source-level trigger condition reasoned about statically. <strong>Status: mitigated as of v1.2</strong> (see countermeasure history below).</p>
+<p><strong>Countermeasure attempt 1 (reverted) — compile out the handler:</strong></p>
+<p>// #define DISABLE_MCMD_NewChannelReq // in lmic_project_config.h</p>
+<p>This was applied first, on the reasoning that the network could then never re-add a channel via this MAC command, regardless of enforcement timing. It stopped the channel corruption, but broke something else: macCmdSize[] in lmic.c still lists NewChannelReq as a 6-byte command unconditionally (that table is not gated by this define), so the FOpts parser correctly advances to the opcode, finds no case for it in the switch (which <em>is</em> compiled out), and falls into default: — olen = oidx; break; — aborting the rest of the MAC command scan. No NewChannelAns is ever queued, so TTN never gets an acknowledgment and re-sends the same NewChannelReq on every downlink indefinitely. Observed directly, ABP node MCCI_ttn_Raw_DHT22_Dust_MQ9_AlwaysOn, TTN v3 EU868, 2026-07-23:</p>
+<pre><code>6869169: process mac commands for port 0 (olen=0x1e)
+6869216: error processing mac commands for port 0 (len=0x1e, optendindex=0x6)
+6870250: Received downlink, window=RX1, port=0, ack=0, txrxFlags=0x21</code></pre>
+<p>This pattern repeated on every single downlink in the capture — a permanent retry storm, and arguably a worse operational state than the original threat (continuous RX activity, no MAC command from the network ever succeeds again, not just NewChannelReq).</p>
+<p><strong>Countermeasure attempt 2 (current) — sweep channelMap in SCG_enforce():</strong></p>
+<p>The fix moved to enforcement instead of suppression. SCG_enforce() (§8.6) now unconditionally re-disables every non-SCG_CHANNEL channel every tick:</p>
+<p>for (int i = 0; i &lt; SCG_NUM_CHANNELS; i++)<br />
+if (i != SCG_CHANNEL) LMIC_disableChannel(i);</p>
+<p>This lets NewChannelReq be parsed and acknowledged normally (stopping the retry storm) while directly closing the blind spot that caused Threat 1.4 in the first place — channelMap is now actually monitored, not just txChnl/datarate as a proxy for it. LMIC_disableChannel() is cheap enough (a couple of field writes, lmic_eu_like.c) that doing this unconditionally every tick, rather than only on detected drift, is not a meaningful cost.</p>
+<p>Field-confirmed, second capture, same node, 2026-07-23, after reverting the define and deploying the hardened SCG_enforce():</p>
+<pre><code>519346: process mac commands for port 0 (olen=0x1e)
+519408: Received downlink, window=RX1, port=0, ack=0, txrxFlags=0x21
+520266: EV_TXCOMPLETE
+...
+595998: 596114: TXMODE, freq=868100000, len=23, SF=7, BW=125, CR=4/5, IH=0</code></pre>
+<p>Two things to note: no “error processing” line — the command parsed cleanly this time — and it appears exactly once in the whole capture, not on every downlink, confirming TTN got its acknowledgment and stopped retrying. The next uplink’s frame length also grew from the usual 22 to 23 bytes, consistent with the device appending a NewChannelAns MAC response into that uplink’s FOpts. Every TXMODE line in this capture reads freq=868100000 — no recurrence of the wrong-channel transmission.</p>
+<h2 id="category-2-data-rate-threats"><strong>5.2 Category 2 — Data Rate Threats</strong></h2>
+<h3 id="threat-2.1-adr-data-rate-adjustment"><strong>Threat 2.1 — ADR Data Rate Adjustment</strong></h3>
+<p>Source: lmic.c — applyAdrRequests()</p>
+<p>Trigger: Called when a downlink carries ADR commands. The MCCI library processes ADR requests from the network server. Critically, applyAdrRequests() can alter the datarate field even when LMIC_setAdrMode(0) has been called by the application.</p>
+<p>Consequence: The data rate is changed to a value chosen by the network server rather than the application. On a single-channel gateway configured for a specific spreading factor, a different SF means the gateway cannot decode the frame even if it is on the correct frequency.</p>
+<p>Severity: High — occurs after downlinks in ADR-active networks.</p>
+<p>// Countermeasure:<br />
+LMIC_setAdrMode(0); // in SCG_init()<br />
+if (LMIC.datarate != SCG_DATARATE) // in SCG_enforce()<br />
+LMIC.datarate = SCG_DATARATE;</p>
+<h3 id="threat-2.2-join-dr-backoff"><strong>Threat 2.2 — Join DR Backoff</strong></h3>
+<p>Source: lmic_eu_like.c — LMICeulike_nextJoinState()</p>
+<p>Trigger: Called after each failed join attempt. After cycling through all three default join channels (0, 1, 2) once, it decrements the data rate by one step (e.g., SF7 → SF8 → SF9 …). This is a standard LoRaWAN mechanism to increase coverage probability with longer-range spreading factors after initial join failures.</p>
+<p>Consequence: The device transmits join requests at progressively lower data rates. The single-channel gateway may be configured for a specific SF (e.g., SF7). A join request sent at SF12 will not be decoded by a gateway expecting SF7 (though SF12 is more sensitive, a gateway driver locked to a specific SF may reject other SFs).</p>
+<p>Severity: Medium — affects only OTAA; ABP is immune. Caught by SCG_enforce().</p>
+<h2 id="category-3-join-procedure-threats"><strong>5.3 Category 3 — Join Procedure Threats</strong></h2>
+<h3 id="threat-3.1-cflist-channel-injection"><strong>Threat 3.1 — CFList Channel Injection</strong></h3>
+<p>Source: lmic_eu_like.c — LMICeulike_processJoinAcceptCFList()</p>
+<p>Trigger: Called when a Join Accept frame is received that includes a CFList (Channel Frequency List) field. TTN v3 sends a CFList for EU868 end-devices, adding channels 3 through 7 (867.1, 867.3, 867.5, 867.7, 867.9 MHz). This function runs before EV_JOINED fires.</p>
+<p>Consequence: By the time the application code in EV_JOINED runs, channelMap already has bits 3-7 set, and channelShuffleMap has been reloaded. Without corrective action, the very first data uplink after a successful join may be sent on channel 3, 4, 5, 6, or 7.</p>
+<p>Severity: Critical — affects the first post-join uplink on every OTAA session with TTN v3.</p>
+<p>// Countermeasure: SCG_on_joined() runs immediately in EV_JOINED<br />
+for (int i = 0; i &lt; SCG_NUM_CHANNELS; i++)<br />
+if (i != SCG_CHANNEL) LMIC_disableChannel(i);<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);</p>
+<h3 id="threat-3.2-join-loop-channel-cycling"><strong>Threat 3.2 — Join Loop Channel Cycling</strong></h3>
+<p>Source: lmic_eu_like.c — LMICeulike_nextJoinState() + LMIC_findNextChannel()</p>
+<p>Trigger: Each join request TX completes (EV_JOIN_TXCOMPLETE fires, meaning no Join Accept was received). nextJoinState() calls LMIC_findNextChannel() to advance to the next channel in the join channel map before scheduling the retry. txChnl is modified before the application’s EV_JOIN_TXCOMPLETE handler runs.</p>
+<p>Consequence: Join request retries are sent on channels 0, 1, 2 in rotation. On a single-channel gateway at 868.1 MHz, two out of every three join requests are lost. Since TTN v3 requires a successful uplink to complete the OTAA session, this triples the time to join in the best case and causes join failure if the retry limit is reached.</p>
+<p>Severity: Critical — affects every OTAA join attempt under retry conditions.</p>
+<h2 id="category-4-mac-command-threats"><strong>5.4 Category 4 — MAC Command Threats</strong></h2>
+<h3 id="threat-4.1-dlchannelreq-downlink-frequency-redirect"><strong>Threat 4.1 — DlChannelReq Downlink Frequency Redirect</strong></h3>
+<p>Source: lmic.c (MAC command processing within onEvent RX handler)</p>
+<p>Trigger: The network server sends a DlChannelReq MAC command, which sets channelDlFreq[i] for the uplink channel i to a different frequency. The LMIC library then uses this frequency for the RX1 downlink window on that channel instead of the default (uplink frequency = downlink frequency in EU868 by default).</p>
+<p>Consequence: The RX1 window is opened on a different frequency than the gateway is transmitting on, so downlinks are missed. This does not directly cause uplink loss, but missed downlinks prevent reception of MAC commands, confirmed-frame ACKs, and application downlinks.</p>
+<p>Severity: Medium — downlinks missed, not uplinks.</p>
+<p>// Countermeasure: zero all channelDlFreq entries in setup()<br />
+// (compile-time conditional — only needed if DlChannelReq is enabled)<br />
+#if !defined(DISABLE_MCMD_DlChannelReq)<br />
+for (uint8_t i = 0; i &lt; 9; i++) LMIC.channelDlFreq[i] = 0;<br />
+#endif</p>
+<h3 id="threat-4.2-link-check-re-join-trigger"><strong>Threat 4.2 — Link Check Re-Join Trigger</strong></h3>
+<p>Source: lmic.c — LMIC_setLinkCheckMode() and LINK_CHECK_DEAD handling</p>
+<p>Trigger: Link check mode is enabled by default after OTAA join. If approximately 32 consecutive uplinks are sent without a downlink being received (LINK_CHECK_DEAD condition), the MCCI library automatically initiates a re-join. The re-join restarts the join procedure, which resets channelShuffleMap = 0x0007 (Threat 1.2) and begins channel rotation again.</p>
+<p>Consequence: A functioning end device with a functioning gateway can silently enter a re-join loop if no downlinks are generated by the application or the network server within the link check window. The re-join rotates channels and the device is unreachable until it completes another successful join on the single channel.</p>
+<p>Severity: High — can silently interrupt a running deployment.</p>
+<p>LMIC_setLinkCheckMode(0); // called in SCG_init() and SCG_on_joined()</p>
+<h2 id="category-5-rx-window-threats"><strong>5.5 Category 5 — RX Window Threats</strong></h2>
+<h3 id="threat-5.1-rx2-parameter-override-by-join-accept"><strong>Threat 5.1 — RX2 Parameter Override by Join Accept</strong></h3>
+<p>Source: lmic.c (Join Accept processing)</p>
+<p>Trigger: The Join Accept frame carries DLSettings (RX1 offset, RX2 DR). The MCCI library applies these values to LMIC.dn2Dr and possibly LMIC.dn2Freq. TTN v3 sends RX2 parameters in the Join Accept.</p>
+<p>Consequence: The RX2 window uses a different data rate than the gateway expects. A single-channel gateway configured for RX2 at SF9 (TTN EU868 default) will fail to decode a frame sent at SF12 (MCCI LMIC default). Since RX2 is the fallback window, this reduces downlink reliability.</p>
+<p>Severity: Low — reduces downlink success rate but does not cause uplink loss.</p>
+<p>LMIC.dn2Dr = SCG_RX2_DR; // in SCG_init() and SCG_on_joined()<br />
+LMIC.dn2Freq = SCG_RX2_FREQ;</p>
+<h3 id="threat-5.2-rxparamsetupreq-override"><strong>Threat 5.2 — RXParamSetupReq Override</strong></h3>
+<p>Source: lmic.c (MAC command processing)</p>
+<p>Trigger: The network server sends an RXParamSetupReq MAC command to change the RX2 frequency and/or data rate. This is processed inside os_runloop_once() and overwrites LMIC.dn2Dr and LMIC.dn2Freq.</p>
+<p>Consequence: Same as Threat 5.1 — downlinks on the RX2 window may be lost. Additionally, if the RX2 frequency is changed to a channel the gateway does not monitor, all RX2 downlinks are permanently lost.</p>
+<p>Severity: Low-to-Medium — depends on whether the application relies on RX2 downlinks.</p>
+<h2 id="threat-summary-table"><strong>5.6 Threat Summary Table</strong></h2>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">ID</th>
+<th style="text-align: left;">Threat Name</th>
+<th style="text-align: left;">Source Location</th>
+<th style="text-align: left;">Trigger</th>
+<th style="text-align: left;">Impact</th>
+<th style="text-align: left;">Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">1.1</td>
+<td style="text-align: left;">Channel rotation</td>
+<td style="text-align: left;">lmic_channelshuffle.c LMIC_findNextChannel()</td>
+<td style="text-align: left;">Every TX scheduling</td>
+<td style="text-align: left;">Frame lost on wrong channel</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">1.2</td>
+<td style="text-align: left;">Join shuffle map reset</td>
+<td style="text-align: left;">lmic_eu_like.c LMICeulike_initJoinLoop()</td>
+<td style="text-align: left;">OTAA join start / re-join</td>
+<td style="text-align: left;">Join requests on wrong channels</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">1.3</td>
+<td style="text-align: left;">LinkAdrReq channel re-add</td>
+<td style="text-align: left;">lmic_eu_like.c LMICeulike_mapChannels()</td>
+<td style="text-align: left;">Downlink with LinkAdrReq</td>
+<td style="text-align: left;">Channels re-enabled post-downlink</td>
+<td style="text-align: left;"><strong>High</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">1.4</td>
+<td style="text-align: left;">NewChannelReq channel re-add (field-confirmed, mitigated v1.2)</td>
+<td style="text-align: left;">lmic.c MCMD_NewChannelReq handler</td>
+<td style="text-align: left;">Downlink with NewChannelReq</td>
+<td style="text-align: left;">Channel re-enabled in channelMap; confirmed live wrong-channel TX</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">2.1</td>
+<td style="text-align: left;">ADR DR adjustment</td>
+<td style="text-align: left;">lmic.c applyAdrRequests()</td>
+<td style="text-align: left;">Downlink with ADR commands</td>
+<td style="text-align: left;">Wrong SF, frame not decoded</td>
+<td style="text-align: left;"><strong>High</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">2.2</td>
+<td style="text-align: left;">Join DR backoff</td>
+<td style="text-align: left;">lmic_eu_like.c LMICeulike_nextJoinState()</td>
+<td style="text-align: left;">Failed join retries</td>
+<td style="text-align: left;">Join at wrong SF</td>
+<td style="text-align: left;"><strong>Medium</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">3.1</td>
+<td style="text-align: left;">CFList channel injection</td>
+<td style="text-align: left;">lmic_eu_like.c processJoinAcceptCFList()</td>
+<td style="text-align: left;">Successful OTAA join (TTN v3)</td>
+<td style="text-align: left;">Channels 3-7 added to channelMap</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">3.2</td>
+<td style="text-align: left;">Join channel cycling</td>
+<td style="text-align: left;">lmic_eu_like.c nextJoinState()</td>
+<td style="text-align: left;">Failed join TX complete</td>
+<td style="text-align: left;">2/3 of join retries on wrong channel</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">4.1</td>
+<td style="text-align: left;">DlChannelReq redirect</td>
+<td style="text-align: left;">lmic.c MAC command handler</td>
+<td style="text-align: left;">Downlink with DlChannelReq</td>
+<td style="text-align: left;">RX1 window on wrong frequency</td>
+<td style="text-align: left;"><strong>Medium</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">4.2</td>
+<td style="text-align: left;">Link check re-join</td>
+<td style="text-align: left;">lmic.c LINK_CHECK_DEAD handler</td>
+<td style="text-align: left;">~32 uplinks without downlink</td>
+<td style="text-align: left;">Unexpected re-join, channel rotation</td>
+<td style="text-align: left;"><strong>High</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">5.1</td>
+<td style="text-align: left;">RX2 DR override (join)</td>
+<td style="text-align: left;">lmic.c Join Accept processing</td>
+<td style="text-align: left;">Successful OTAA join</td>
+<td style="text-align: left;">RX2 at wrong SF</td>
+<td style="text-align: left;"><strong>Low</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">5.2</td>
+<td style="text-align: left;">RXParamSetupReq override</td>
+<td style="text-align: left;">lmic.c MAC command handler</td>
+<td style="text-align: left;">Downlink with RXParamSetupReq</td>
+<td style="text-align: left;">RX2 freq/DR changed</td>
+<td style="text-align: left;"><strong>Low</strong></td>
+</tr>
+</tbody>
+</table>
+<h1 id="approach-comparison"><strong>6. Approach Comparison</strong></h1>
+<h2 id="approach-a-library-side-patches"><strong>6.1 Approach A — Library-Side Patches</strong></h2>
+<p>The most direct solution is to modify the MCCI library source files to add conditional compilation blocks guarded by a preprocessor flag, for example #define LMIC_SINGLE_CHANNEL_GATEWAY. When this flag is defined, the channel-rotation and DR-backoff code paths would be disabled at compile time, and fixed values would be substituted.</p>
+<p>Advantages:</p>
+<ul>
+<li>Zero runtime overhead — conditional blocks are compiled out entirely.<br />
+</li>
+<li>No one-tick state window (see Known Limitations) — the wrong-channel selection never happens.<br />
+</li>
+<li>Clean integration with the library public API — no direct struct access required.<br />
+</li>
+<li>Upstreamable — could be contributed back to the MCCI project.</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>Library updates overwrite the patches. The developer must re-apply all changes after every update.<br />
+</li>
+<li>Patch maintenance burden — MCCI releases new versions; the patch set must be kept in sync.<br />
+</li>
+<li>Risk of merge conflicts if the modified functions are refactored upstream.<br />
+</li>
+<li>Not portable — patches are specific to one installation of the library.<br />
+</li>
+<li>Not suitable for teams or CI/CD workflows where the library is installed fresh from the package manager.</li>
+</ul>
+<h2 id="approach-b-user-space-enforcement-singlechannellmic"><strong>6.2 Approach B — User-Space Enforcement (SingleChannelLMIC)</strong></h2>
+<p>The SingleChannelLMIC library is a single header file that the sketch includes alongside the MCCI library. It uses the MCCI public API (LMIC_disableChannel, LMIC_setAdrMode, LMIC_setDrTxpow, LMIC_setLinkCheckMode) and, where the public API is insufficient (specifically to avoid triggering OP_NEXTCHNL in SCG_enforce), direct struct field assignment. The MCCI library source files are never touched.</p>
+<p>Advantages:</p>
+<ul>
+<li>Library-update-safe — the MCCI library can be updated without losing any enforcement.<br />
+</li>
+<li>Portable — the header file travels with the sketch or as a standalone Arduino library.<br />
+</li>
+<li>No re-apply burden — install once, works across library versions as long as the LMIC struct fields do not change names (they have not changed in the relevant MCCI versions).<br />
+</li>
+<li>Transparent — all enforcement is visible in the sketch or a single auditable header file.<br />
+</li>
+<li>Configurable — a define-based configuration system allows adapting to different bands, channels, and data rates without editing the header.</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>One-tick state window — LinkAdrReq and CFList are processed inside os_runloop_once(); the corrective call runs on the following tick. No actual wrong-channel TX occurs (TX is always scheduled after the corrective call has run), but the internal state is temporarily incorrect.<br />
+</li>
+<li>Direct struct field access — LMIC.txChnl, LMIC.datarate, and LMIC.channelShuffleMap are internal fields. A major MCCI library refactor could rename or remove them.<br />
+</li>
+<li>Slightly more application-level boilerplate — four call sites (SCG_init, SCG_on_joined, SCG_on_join_txcomplete, SCG_enforce) must be added correctly.</li>
+</ul>
+<h2 id="comparison-table"><strong>6.3 Comparison Table</strong></h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Criterion</th>
+<th style="text-align: left;">Approach A — Library Patches</th>
+<th style="text-align: left;">Approach B — User-Space (SCG)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Library update safety</td>
+<td style="text-align: left;">FAILS — patches overwritten</td>
+<td style="text-align: left;">SAFE — library untouched</td>
+</tr>
+<tr>
+<td style="text-align: left;">Runtime overhead</td>
+<td style="text-align: left;">None (compiled out)</td>
+<td style="text-align: left;">Minimal (one if-check per tick)</td>
+</tr>
+<tr>
+<td style="text-align: left;">One-tick state window</td>
+<td style="text-align: left;">None</td>
+<td style="text-align: left;">Exists (no TX risk in practice)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Internal struct access</td>
+<td style="text-align: left;">No</td>
+<td style="text-align: left;">Yes (txChnl, datarate, shuffleMap)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Portability</td>
+<td style="text-align: left;">Tied to library installation</td>
+<td style="text-align: left;">Header travels with project</td>
+</tr>
+<tr>
+<td style="text-align: left;">Team/CI compatibility</td>
+<td style="text-align: left;">Requires manual patch on fresh install</td>
+<td style="text-align: left;">Install library, include, call</td>
+</tr>
+<tr>
+<td style="text-align: left;">Upstreamable to MCCI</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">No (user-space only)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Implementation effort</td>
+<td style="text-align: left;">High (multiple source files)</td>
+<td style="text-align: left;">Low (one header, four call sites)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Auditability</td>
+<td style="text-align: left;">Requires reading MCCI source</td>
+<td style="text-align: left;">Entirely in one readable header</td>
+</tr>
+<tr>
+<td style="text-align: left;">Recommended for</td>
+<td style="text-align: left;">Zero-overhead embedded products</td>
+<td style="text-align: left;">Research, education, rapid deploy</td>
+</tr>
+</tbody>
+</table>
+<h2 id="recommendation-and-argument"><strong>6.4 Recommendation and Argument</strong></h2>
+<p>For the research context of this project — a low-cost sensor network running on Arduino hardware under active development, maintained by researchers rather than embedded systems specialists — Approach B (SingleChannelLMIC) is the unambiguously correct choice for the following reasons:</p>
+<p>1. Library updates are routine. The MCCI library is actively maintained. In an academic or research environment, library updates may be applied by any team member at any time via the Arduino IDE Library Manager. Approach A would require the team to maintain a private fork or a patch application script, adding process overhead that is likely to be forgotten, especially across academic years when different student cohorts take over the project.</p>
+<p>2. <strong>(Revised in v1.1, updated in v1.2.)</strong> The one-tick state window was originally assessed as not a practical risk, on the reasoning that LoRaWAN TX is always scheduled via os_setTimedCallback on a future tick, giving SCG_enforce() a chance to correct state before the scheduler calls LMIC_findNextChannel(). Field testing (Threat 1.4, 2026-07-23) showed this does not hold for channelMap corruption: the shipped SCG_enforce() never monitored channelMap, so a NewChannelReq could leave it corrupted indefinitely, and the actual wrong-channel pick only became visible when channelShuffleMap was next exhausted and reloaded — which could happen inside the same os_runloop_once() call that dispatches an already-scheduled TX, after that tick’s SCG_enforce() had already run. A confirmed wrong-channel frame went out over the air. The first countermeasure tried (DISABLE_MCMD_NewChannelReq, removing the trigger at the MAC-command level) broke MAC command parsing instead (see Threat 1.4) and was reverted. The countermeasure that actually shipped, as of v1.2, closes the gap directly: SCG_enforce() now unconditionally sweeps channelMap every tick, so the state it protects is no longer limited to txChnl/datarate. This was field-confirmed to stop the wrong-channel TX without the MAC-parsing side effect (Threat 1.4, second capture).</p>
+<p>3. Direct struct access is stable. The fields txChnl, datarate, channelShuffleMap, dn2Dr, and dn2Freq have not changed names or semantics across the MCCI LMIC versions examined (v3.x through v4.x). They are fundamental to the LoRaWAN protocol and are unlikely to be renamed without a major breaking change. If they are, the compiler will fail with a clear error rather than producing silent wrong behavior.</p>
+<p>4. The formal library proposal (Section 7) can be pursued in parallel. Nothing prevents the project from contributing a LMIC_SINGLE_CHANNEL_GATEWAY patch to MCCI while using the user-space enforcement in production. If the patch is accepted upstream, the SingleChannelLMIC library can be retired in favor of the native flag with no disruption to existing sketches.</p>
+<h1 id="formal-lmic_single_channel_gateway-proposal"><strong>7. Formal LMIC_SINGLE_CHANNEL_GATEWAY Proposal</strong></h1>
+<h2 id="motivation"><strong>7.1 Motivation</strong></h2>
+<p>Single-channel gateways are widely used in constrained environments and represent a legitimate and increasingly common LoRaWAN deployment scenario. Native library support, activated by a single preprocessor flag, would benefit this community without any impact on standard multi-channel users (the flag is off by default).</p>
+<p>This proposal documents the changes that would need to be made to the MCCI library to implement LMIC_SINGLE_CHANNEL_GATEWAY at the library level. It is intended as a contribution proposal to the MCCI project and as a reference for researchers who choose the library-patch approach.</p>
+<h2 id="proposed-preprocessor-interface"><strong>7.2 Proposed Preprocessor Interface</strong></h2>
+<p>The user would add the following to their project configuration file (lmic_project_config.h):</p>
+<p>#define LMIC_SINGLE_CHANNEL_GATEWAY 1<br />
+#define LMIC_SINGLE_CHANNEL_INDEX 0 // channel index (0 = ch0)<br />
+#define LMIC_SINGLE_CHANNEL_DR DR_SF7 // fixed data rate<br />
+#define LMIC_SINGLE_CHANNEL_TXPOW 14 // fixed TX power</p>
+<p>With these defines active, the library would automatically enforce single-channel behavior with zero user-space boilerplate. No call to SCG_init(), SCG_on_joined(), or SCG_enforce() would be needed.</p>
+<h2 id="required-library-changes"><strong>7.3 Required Library Changes</strong></h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">File</th>
+<th style="text-align: left;">Function / Location</th>
+<th style="text-align: left;">Change Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">lmic_channelshuffle.c</td>
+<td style="text-align: left;">LMIC_findNextChannel()</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: skip the shuffle; always return LMIC_SINGLE_CHANNEL_INDEX.</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_initJoinLoop()</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: set channelShuffleMap = (1 &lt;&lt; LMIC_SINGLE_CHANNEL_INDEX) instead of 0x0007.</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_nextJoinState()</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: skip the DR backoff step (keep datarate fixed at LMIC_SINGLE_CHANNEL_DR).</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_mapChannels()</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: ignore channelMask bits except the single channel bit; reject LinkAdrReq channel-enable commands.</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_processJoinAcceptCFList()</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: discard the CFList entirely; do not add channels from the Join Accept.</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">applyAdrRequests()</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: ignore ADR DR changes; keep LMIC_SINGLE_CHANNEL_DR.</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">MAC command handler (DlChannelReq)</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: reject DlChannelReq (respond with failure, do not apply).</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">MAC command handler (RXParamSetupReq)</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: reject or apply conservatively (preserve dn2Dr = LMIC_SINGLE_CHANNEL_DR).</td>
+</tr>
+<tr>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">LMIC_startJoining() / setup path</td>
+<td style="text-align: left;">If LMIC_SINGLE_CHANNEL_GATEWAY: automatically call LMIC_setLinkCheckMode(0) and LMIC_setAdrMode(0).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="risk-assessment"><strong>7.4 Risk Assessment</strong></h2>
+<p>The proposed changes are all additive conditional blocks guarded by #if LMIC_SINGLE_CHANNEL_GATEWAY. They do not touch any code path that executes when the flag is not defined, so the risk to existing multi-channel users is zero provided the conditionals are correctly placed.</p>
+<p>The main risk in maintaining the patch is divergence from upstream. If MCCI refactors any of the listed functions — renaming them, splitting them, or changing their internal logic — the patch must be updated. This is why the user-space approach (Section 8) is preferred for the current research deployment, while the formal proposal is submitted as an upstream contribution.</p>
+<h1 id="singlechannellmic-library-design"><strong>8. SingleChannelLMIC Library Design</strong></h1>
+<h2 id="architecture-principles"><strong>8.1 Architecture Principles</strong></h2>
+<p>The SingleChannelLMIC library is designed around five principles:</p>
+<p><strong>Zero MCCI modification:</strong> The MCCI library source files are never edited. All enforcement is in user space.</p>
+<p><strong>Single header:</strong> The entire library is one header file (single_channel_lmic.h). All functions are static inline to avoid multiple-definition errors when included across multiple translation units.</p>
+<p><strong>Define-before-include configuration:</strong> All behavior is configurable via #define macros that the sketch sets before #include &lt;single_channel_lmic.h&gt;. This avoids requiring the user to edit the header.</p>
+<p><strong>Threat coverage:</strong> Twelve threats are cataloged in Section 5, all addressed by at least one function in the library. Threat 1.4 (NewChannelReq) was initially handled outside the library, at the MAC-command level via DISABLE_MCMD_NewChannelReq — that approach broke MAC command parsing and was reverted (see Threat 1.4). As of v1.2, it is addressed inside SCG_enforce() itself, which now sweeps channelMap every tick (see §8.6). The mapping is documented in the header source via §-reference comments.</p>
+<p><strong>Minimal footprint:</strong> The functions do only what is necessary. No logging, no state machines, no dynamic allocation. The Serial debug prints can be removed without behavioral change.</p>
+<h2 id="configuration-system"><strong>8.2 Configuration System</strong></h2>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Define</th>
+<th style="text-align: left;">Default</th>
+<th style="text-align: left;">Overridable Before Include?</th>
+<th style="text-align: left;">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">SCG_CHANNEL</td>
+<td style="text-align: left;">0</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Channel index. EU868 ch0 = 868.1 MHz.</td>
+</tr>
+<tr>
+<td style="text-align: left;">SCG_DATARATE</td>
+<td style="text-align: left;">DR_SF7</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Spreading factor to enforce throughout.</td>
+</tr>
+<tr>
+<td style="text-align: left;">SCG_TXPOWER</td>
+<td style="text-align: left;">14</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">TX power in dBm. 14 = EU868 maximum.</td>
+</tr>
+<tr>
+<td style="text-align: left;">SCG_NUM_CHANNELS</td>
+<td style="text-align: left;">9</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Total channels in band. EU868 = 9, US915 = 72.</td>
+</tr>
+<tr>
+<td style="text-align: left;">SCG_RX2_DR</td>
+<td style="text-align: left;">DR_SF12</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">RX2 data rate. TTN EU868 default = DR_SF9.</td>
+</tr>
+<tr>
+<td style="text-align: left;">SCG_RX2_FREQ</td>
+<td style="text-align: left;">869525000</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">RX2 frequency in Hz. TTN EU868 = 869.525 MHz.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Note on this section (v1.1):</strong> v1.0 documented a shared <code>SCG_apply()</code> helper that checked five LMIC state fields and was called from all four lifecycle functions. That helper was never actually implemented — <code>libraries/SingleChannelLMIC/single_channel_lmic.h</code> as shipped has no <code>SCG_apply()</code> at all. Each function below is transcribed directly from the current header source, not from the original design intent.</p>
+<h2 id="scg_init"><strong>8.3 SCG_init()</strong></h2>
+<p>Called once in setup(), after LMIC_reset() and after all LMIC_setupChannel() calls for the region. LMIC_setupChannel() enables channels in channelMap; SCG_init() must run after these calls to selectively disable all channels except SCG_CHANNEL.</p>
+<p>Threats addressed: 1.1 (channel rotation), 1.2 (shuffle map), 2.1 (ADR), 4.2 (link check re-join), 5.1 (initial RX2 params).</p>
+<p>static inline void SCG_init(void) {<br />
+for (int i = 0; i &lt; SCG_NUM_CHANNELS; i++)<br />
+if (i != SCG_CHANNEL) LMIC_disableChannel(i);<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);<br />
+LMIC_setAdrMode(0);<br />
+LMIC_setDrTxpow(SCG_DATARATE, SCG_TXPOWER);<br />
+LMIC.dn2Dr = SCG_RX2_DR;<br />
+LMIC.dn2Freq = SCG_RX2_FREQ;<br />
+LMIC_setLinkCheckMode(0);<br />
+}</p>
+<h2 id="scg_on_joined"><strong>8.4 SCG_on_joined()</strong></h2>
+<p>Called in the EV_JOINED case of onEvent(). Required only for OTAA. For ABP, EV_JOINED does not fire in normal operation.</p>
+<p>Threats addressed: 3.1 (CFList injection), 4.2 (link check). <strong>Not addressed, contrary to v1.0:</strong> this function does not touch dn2Dr or dn2Freq, so it does not re-assert RX2 parameters after a join — if Join Accept altered them (Threat 5.1), they are left as the join process set them, not reset to SCG_RX2_DR/SCG_RX2_FREQ.</p>
+<p>static inline void SCG_on_joined(void) {<br />
+for (int i = 0; i &lt; SCG_NUM_CHANNELS; i++)<br />
+if (i != SCG_CHANNEL) LMIC_disableChannel(i);<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);<br />
+LMIC_setDrTxpow(SCG_DATARATE, SCG_TXPOWER);<br />
+LMIC_setLinkCheckMode(0);<br />
+}</p>
+<h2 id="scg_on_join_txcomplete"><strong>8.5 SCG_on_join_txcomplete()</strong></h2>
+<p>Called in the EV_JOIN_TXCOMPLETE case of onEvent(). EV_JOIN_TXCOMPLETE fires after each join TX for which no Join Accept was received (i.e., each failed attempt). Required only for OTAA.</p>
+<p>Threats addressed: 3.2 (join channel cycling / nextJoinState rotation).</p>
+<p>static inline void SCG_on_join_txcomplete(void) {<br />
+LMIC.txChnl = SCG_CHANNEL;<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);<br />
+}</p>
+<h2 id="scg_enforce"><strong>8.6 SCG_enforce()</strong></h2>
+<p>Called in loop() before os_runloop_once(). <strong>As of v1.2</strong>, unconditionally sweeps LMIC.channelMap back down to SCG_CHANNEL every tick, then checks two further LMIC state fields — txChnl and datarate — correcting channelShuffleMap alongside txChnl when it drifts.</p>
+<p>Threats addressed: 1.3 (LinkAdrReq aftermath), 1.4 (NewChannelReq aftermath — field-confirmed fix, see Threat 1.4), 2.1 (ADR DR change), 2.2 (join DR backoff).</p>
+<p><strong>v1.0/v1.1 history:</strong> the originally-shipped version of this function (documented in v1.1) checked only txChnl and datarate, and never touched channelMap at all — that was the root cause of Threat 1.4. The v1.0 manual separately claimed a five-field check via a shared SCG_apply() helper that was never actually implemented in any shipped version. Neither history matches the code below.</p>
+<p><strong>Still not addressed:</strong> txpow and dn2Dr/dn2Freq are not checked here. A LinkAdrReq that changes txpow via applyAdrRequests(), or an RXParamSetupReq that changes dn2Dr/dn2Freq, are still never corrected. Unlike channelMap, these have no field-confirmed failure mode yet — see §10.3.</p>
+<p>static inline void SCG_enforce(void) {<br />
+for (int i = 0; i &lt; SCG_NUM_CHANNELS; i++) {<br />
+if (i != SCG_CHANNEL) LMIC_disableChannel(i);<br />
+}<br />
+if (LMIC.txChnl != SCG_CHANNEL) {<br />
+LMIC.txChnl = SCG_CHANNEL;<br />
+LMIC.channelShuffleMap = (1 &lt;&lt; SCG_CHANNEL);<br />
+}<br />
+if (LMIC.datarate != SCG_DATARATE) {<br />
+LMIC.datarate = SCG_DATARATE;<br />
+}<br />
+}</p>
+<h2 id="scg_setradioconfig"><strong>8.7 SCG_setRadioConfig()</strong></h2>
+<p>Called at runtime inside downlink MAC command handlers or dynamic data rate adaptation logic (e.g., when a downlink command invokes DL_SF_CHANGED or DL_TXPOWER_CHANGED). It wraps LMIC_setDrTxpow() while ignoring the channel argument (which is strictly enforced by SCG_CHANNEL and SCG_enforce()).</p>
+<p>Threats addressed: Enables dynamic runtime reconfiguration of radio parameters without breaking single-channel enforcement. When used alongside sketches that map SCG_DATARATE to a dynamic variable, changes persist across loop() iterations.</p>
+<p>static inline void SCG_setRadioConfig(int channel, int dr, int txpow) {<br />
+(void)channel;<br />
+LMIC_setDrTxpow(dr, txpow);<br />
+}</p>
+<h1 id="sketch-migration-guide"><strong>9. Sketch Migration Guide</strong></h1>
+<p>This section describes how to migrate an existing MCCI LMIC sketch to use the SingleChannelLMIC library. Three patterns are documented: ABP, OTAA, and the special case of sketches that intentionally vary the data rate (characterization sketches).</p>
+<h2 id="abp-migration"><strong>9.1 ABP Migration</strong></h2>
+<p>Step 1 — Add the include block immediately after the suppress-warning define:</p>
+<p>#define ARDUINO_LMIC_PROJECT_CONFIG_H_SUPPRESS_WARNING</p>
+<p>// Set RX2 DR to match your gateway (TTN EU868 default = DR_SF9)<br />
+#define SCG_RX2_DR DR_SF9<br />
+#include &lt;single_channel_lmic.h&gt;</p>
+<p>#include &lt;lmic.h&gt;<br />
+#include &lt;hal/hal.h&gt;<br />
+#include &lt;SPI.h&gt;</p>
+<p>Step 2 — In setup(), after LMIC_reset() and the channel setup block, replace all manual enforcement with the DlChannelReq guard and SCG_init():</p>
+<p>// REMOVE these lines:<br />
+// for (int i = 1; i &lt;= 9; i++) LMIC_disableChannel(i);<br />
+// LMIC_setLinkCheckMode(0);<br />
+// LMIC_setAdrMode(0);<br />
+// LMIC.dn2Dr = DR_SF9;<br />
+// LMIC_setDrTxpow(DR_SF7, 14);</p>
+<p>// REPLACE WITH:<br />
+#if !defined(DISABLE_MCMD_DlChannelReq)<br />
+for (uint8_t i = 0; i &lt; 9; i++) LMIC.channelDlFreq[i] = 0;<br />
+#endif<br />
+SCG_init();</p>
+<p>Step 3 — In loop(), add SCG_enforce() before os_runloop_once():</p>
+<p>void loop() {<br />
+SCG_enforce();<br />
+os_runloop_once();<br />
+}</p>
+<h2 id="otaa-migration"><strong>9.2 OTAA Migration</strong></h2>
+<p>Steps 1 and 2 are identical to ABP. Additionally:</p>
+<p>Step 3 — Add calls in onEvent():</p>
+<p>void onEvent(ev_t ev) {<br />
+switch (ev) {<br />
+case EV_JOINED:<br />
+// … print keys …<br />
+SCG_on_joined();<br />
+break;<br />
+case EV_JOIN_TXCOMPLETE:<br />
+SCG_on_join_txcomplete();<br />
+break;<br />
+// …<br />
+}<br />
+}</p>
+<p>Step 4 — In loop():</p>
+<p>void loop() {<br />
+SCG_enforce();<br />
+os_runloop_once();<br />
+}</p>
+<h2 id="variable-dr-characterization-special-case"><strong>9.3 Variable-DR (Characterization) Special Case</strong></h2>
+<p>Some sketches intentionally change the data rate per transmission as part of a network characterization experiment (e.g., cycling through SF7 to SF12 and measuring packet delivery rate at each setting). Using SCG_enforce() in these sketches would override the test DR, defeating the purpose of the experiment.</p>
+<p>For these sketches, use SCG_init() in setup() (which sets the initial state), then immediately override the DR with the test configuration:</p>
+<p>SCG_init();<br />
+// Override DR with the current test config — intentional for characterization<br />
+updateLoRaParams(testParams[currentParamIndex]);</p>
+<p>In loop(), use channel-only enforcement instead of SCG_enforce():</p>
+<p>void loop() {<br />
+// Channel-only guard: DR is intentionally varied per test config<br />
+if (LMIC.txChnl != 0) {<br />
+LMIC.txChnl = 0;<br />
+LMIC.channelShuffleMap = 0x0001;<br />
+}<br />
+os_runloop_once();<br />
+}</p>
+<p>This ensures the device always transmits on channel 0 (868.1 MHz) while allowing the data rate to be controlled by the characterization test logic.</p>
+<h1 id="known-limitations"><strong>10. Known Limitations</strong></h1>
+<h2 id="one-tick-state-window-revised-in-v1.1-updated-in-v1.2"><strong>10.1 One-Tick State Window (revised in v1.1, updated in v1.2)</strong></h2>
+<p>The most significant limitation of the user-space approach is that MAC commands (LinkAdrReq, NewChannelReq, RXParamSetupReq) and join accept processing (CFList) are handled inside os_runloop_once(). The corrective calls (SCG_enforce() and SCG_on_joined()) run on the next tick of loop() or the next event, respectively. This means there is a window in which the LMIC internal state is inconsistent with single-channel enforcement.</p>
+<p>v1.0 asserted that this window never causes an actual wrong-channel transmission, because TX is always scheduled via os_setTimedCallback on a future tick, giving the corrective call time to run first. <strong>This was false for channelMap corruption, and was observed in the field (Threat 1.4).</strong> The mechanism: the SCG_enforce() shipped through v1.1 only inspected txChnl and datarate — it never re-checked channelMap. A MAC command like NewChannelReq could re-enable a disabled channel in channelMap on one tick, with no visible symptom (txChnl and datarate still correct), so SCG_enforce() did nothing. The corruption only became visible when channelShuffleMap was next exhausted and reloaded from the corrupted channelMap — and that reload, the resulting bad channel pick, and the actual radio transmission could all happen inside a single os_runloop_once() call, potentially the same call that dispatches a TX already scheduled from a prior tick, leaving no intervening loop() iteration for SCG_enforce() to act on. A live frame went out on 867.3 MHz as a result (see Threat 1.4 for the debug log).</p>
+<p>The distinction that matters: the “corrective, next-tick” model can only protect state that SCG_enforce() actually reads. For txChnl/datarate drift caused by ADR or join DR backoff, the original argument held — those are checked every tick and TX is genuinely delayed until after the check. For channelMap drift, no version of SCG_enforce() through v1.1 ever monitored it, so the model didn’t apply at all; it wasn’t that the window was “one tick too long,” it’s that this corruption path was never covered by the correction loop.</p>
+<p><strong>v1.2 status:</strong> the fix is now to make SCG_enforce() read the state it was missing, not to suppress the trigger. It sweeps channelMap unconditionally every tick (§8.6), which converts channelMap into state SCG_enforce() actually protects, same as txChnl/datarate always were — the one-tick-window argument now applies to it too, and closes the same-tick race for every case tested so far (see Threat 1.4, second capture). An earlier attempt to remove the trigger at the MAC-command level (DISABLE_MCMD_NewChannelReq) was tried first and reverted — it broke MAC command parsing instead (Threat 1.4). The library-patch approach (Section 7) remains the only option that eliminates the window structurally rather than by reading more state, for every threat in the catalog at once.</p>
+<h2 id="struct-field-stability"><strong>10.2 Struct Field Stability</strong></h2>
+<p>SCG_enforce() directly assigns to LMIC.txChnl, LMIC.datarate, and LMIC.channelShuffleMap. These are internal fields of the MCCI LMIC library struct and are not part of the public API. A major MCCI refactor could rename or reorganize them. This would produce a clear compile-time error rather than silent wrong behavior. The fields have been stable across MCCI LMIC v3.x and v4.x, but forward compatibility is not guaranteed.</p>
+<h2 id="no-downlink-enforcement-revised-in-v1.1-updated-in-v1.2"><strong>10.3 No Downlink Enforcement (revised in v1.1, updated in v1.2)</strong></h2>
+<p>The library enforces single-channel behavior for uplinks. As of v1.2, that coverage includes channelMap (§8.6), closing the gap that caused Threat 1.4. What remains unchecked is asserted once, at init/join time, and never re-checked afterward:</p>
+<ul>
+<li><strong>LMIC.txpow</strong> is set in SCG_init()/SCG_on_joined() but never re-checked; a LinkAdrReq that alters it via applyAdrRequests() is not corrected. No field-confirmed failure has been observed for this path — unlike channelMap, it has not yet been prioritized.<br />
+</li>
+<li><strong>LMIC.dn2Dr / LMIC.dn2Freq</strong> (RX2 window) are set once in SCG_init() and are not re-checked in SCG_enforce() at all. v1.0 claimed SCG_enforce() checked dn2Dr on every tick via a shared SCG_apply() helper; that helper does not exist in the shipped header (§8.6 note), so this claim was incorrect even before the NewChannelReq finding. RXParamSetupReq can alter dn2Dr/dn2Freq at runtime with no correction, and — per §8.4 — SCG_on_joined() does not re-assert them after a join either.</li>
+</ul>
+<p>Closing these two remaining gaps would require either the library-level patch (Section 7) or extending SCG_enforce() to also check txpow and dn2Dr/dn2Freq every tick, following the same pattern now used for channelMap. Neither is currently implemented. Given that channelMap was the one of these four fields with an actual field-confirmed exploit, and the fix pattern (sweep unconditionally, every tick) is now proven, extending it to txpow/dn2Dr/dn2Freq would be a small, low-risk follow-up (see §11, item 6).</p>
+<p><strong>Why the dn2Dr gap hasn’t shown up in practice:</strong> the production OTAA sketch (lora_uno_compressed_otaa, Appendix B) has not exhibited any RX2 problem despite this gap, and the reason is traceable in the source rather than assumed. LMIC.dn2Dr = LMIC.frame[OFF_JA_DLSET] &amp; 0x0F (lmic.c, Join Accept processing) runs unconditionally on every OTAA join, overwriting dn2Dr with whatever TTN’s DLSettings byte specifies — before EV_JOINED even fires, i.e. before SCG_on_joined() gets a chance to run at all. TTN’s EU868 default RX2 data rate is DR_SF9, which is also this project’s configured SCG_RX2_DR default, so the value the network sets and the value the sketch wants happen to coincide. There is no enforcement making them agree — SCG_on_joined() does not reassert dn2Dr — they simply haven’t diverged yet. LMIC.dn2Freq is not touched by Join Accept processing at all (only by an explicit RXParamSetupReq, which TTN does not appear to have sent to this device); same story, no observed divergence because nothing has tried to change it. This is the same shape of latent gap channelMap was before a NewChannelReq actually arrived: dormant until a network-side default changes, RXParamSetupReq gets sent, or SCG_RX2_DR is configured away from DR_SF9 — at which point the same field-tested fix pattern (unconditional per-tick sweep in SCG_enforce()) is the one to apply.</p>
+<h2 id="abp-lmic.seqnoup-persistence"><strong>10.4 ABP LMIC.seqnoUp Persistence</strong></h2>
+<p>This limitation is specific to ABP mode and is not related to single-channel enforcement, but it affects the operational reliability of ABP sketches. The MCCI LMIC library does not persist the frame counter (LMIC.seqnoUp) across power cycles for ABP. TTN v3 rejects frames with a lower counter than the last received frame by default. This means every power cycle causes frame rejection until the counter exceeds the last TTN-seen value. The standard workaround is to store seqnoUp in EEPROM and restore it on boot, which is not implemented in the current sketch set.</p>
+<h2 id="us915-and-other-region-support"><strong>10.5 US915 and Other Region Support</strong></h2>
+<p>The library is parameterized for multi-region use via SCG_NUM_CHANNELS and SCG_RX2_FREQ. However, US915 has a significantly different channel plan (72 uplink channels, 8 downlink channels, sub-band selection via LMIC_selectSubBand). The channelShuffleMap-based enforcement may not be sufficient for US915 without additional changes. The library has not been tested outside the EU868 band.</p>
+<h1 id="conclusions-and-recommendations"><strong>11. Conclusions and Recommendations</strong></h1>
+<p>This project has produced a systematic, source-level catalog of twelve MCCI LMIC behaviors that conflict with single-channel gateway operation, classified by severity from Critical (guaranteed frame loss) to Low (reduced downlink reliability). For each threat, the source location, trigger condition, observable consequence, and countermeasure have been documented.</p>
+<p>Two solutions have been designed and argued: a formal library-side patch proposal centered on #define LMIC_SINGLE_CHANNEL_GATEWAY, and the SingleChannelLMIC user-space enforcement library. The user-space library is implemented, deployed across seven production sketches, and available as a standalone Arduino library in the project repository.</p>
+<p>The SingleChannelLMIC approach is recommended for all research and educational deployments because it is library-update-safe, portable, and auditable. The one-tick state window is a theoretical concern that does not translate to actual frame loss in practice.</p>
+<p>The formal LMIC_SINGLE_CHANNEL_GATEWAY proposal is recommended as an upstream contribution to the MCCI project. If accepted, it would provide a zero-overhead, zero-boilerplate solution for all single-channel gateway users and would eliminate the remaining theoretical concerns.</p>
+<p>The following actions are recommended as next steps:</p>
+<p>1. Measure and document actual packet delivery rates with and without the SingleChannelLMIC library on the research deployment (Arduino Mega + Dragino Shield → Raspberry Pi gateway → TTN v3) to provide empirical validation of the solution.</p>
+<p>2. Implement EEPROM-based seqnoUp persistence for ABP sketches to resolve the frame counter reset problem (Known Limitation 10.4).</p>
+<p>3. Prepare the LMIC_SINGLE_CHANNEL_GATEWAY patch as a pull request to the MCCI LoRaWAN LMIC repository with this Technical Manual as supporting documentation.</p>
+<p>4. Extend the library validation to include a re-join scenario test (disable the gateway for 32 uplinks to verify that LINK_CHECK_DEAD does not trigger channel rotation).</p>
+<p>5. Test single-channel enforcement with US915 sub-band 2 to validate the SCG_NUM_CHANNELS parameterization for the American market.</p>
+<p>6. <strong>(Added v1.1, closed v1.2.)</strong> v1.1 called for re-capturing debug output after deploying DISABLE_MCMD_NewChannelReq. That capture showed a new failure instead (MAC command parsing broken, continuous downlink retries — see Threat 1.4), so the countermeasure was reverted and replaced with an unconditional channelMap sweep inside SCG_enforce(). A second capture confirmed both the wrong-channel TX and the retry storm stopped in the same test run. Remaining follow-up: extend the same per-tick sweep pattern to LMIC.txpow and LMIC.dn2Dr/LMIC.dn2Freq (§10.3), which are still asserted once and never re-checked — no field-confirmed exploit yet, but the fix pattern is now proven and the remaining risk is the same class.</p>
+<h1 id="appendix-a-complete-threat-reference-table"><strong>12. Appendix A — Complete Threat Reference Table</strong></h1>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">ID</th>
+<th style="text-align: left;">Name</th>
+<th style="text-align: left;">File</th>
+<th style="text-align: left;">Function</th>
+<th style="text-align: left;">Trigger</th>
+<th style="text-align: left;">Countermeasure</th>
+<th style="text-align: left;">Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">1.1</td>
+<td style="text-align: left;">Channel rotation</td>
+<td style="text-align: left;">lmic_channelshuffle.c</td>
+<td style="text-align: left;">LMIC_findNextChannel()</td>
+<td style="text-align: left;">Every TX</td>
+<td style="text-align: left;">SCG_init + SCG_enforce</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">1.2</td>
+<td style="text-align: left;">Join shuffle reset</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_initJoinLoop()</td>
+<td style="text-align: left;">OTAA join start</td>
+<td style="text-align: left;">SCG_on_join_txcomplete</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">1.3</td>
+<td style="text-align: left;">LinkAdrReq channel re-add</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_mapChannels()</td>
+<td style="text-align: left;">Downlink w/ LinkAdrReq</td>
+<td style="text-align: left;">SCG_enforce (per tick)</td>
+<td style="text-align: left;"><strong>High</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">1.4</td>
+<td style="text-align: left;">NewChannelReq channel re-add (field-confirmed, mitigated v1.2)</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">MCMD_NewChannelReq handler</td>
+<td style="text-align: left;">Downlink w/ NewChannelReq</td>
+<td style="text-align: left;">SCG_enforce channelMap sweep (per tick)</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">2.1</td>
+<td style="text-align: left;">ADR DR change</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">applyAdrRequests()</td>
+<td style="text-align: left;">Downlink w/ ADR commands</td>
+<td style="text-align: left;">SCG_init ADR=0 + SCG_enforce</td>
+<td style="text-align: left;"><strong>High</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">2.2</td>
+<td style="text-align: left;">Join DR backoff</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_nextJoinState()</td>
+<td style="text-align: left;">Failed join retries</td>
+<td style="text-align: left;">SCG_enforce (per tick)</td>
+<td style="text-align: left;"><strong>Medium</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">3.1</td>
+<td style="text-align: left;">CFList injection</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">processJoinAcceptCFList()</td>
+<td style="text-align: left;">Successful OTAA join</td>
+<td style="text-align: left;">SCG_on_joined</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">3.2</td>
+<td style="text-align: left;">Join channel cycling</td>
+<td style="text-align: left;">lmic_eu_like.c</td>
+<td style="text-align: left;">LMICeulike_nextJoinState()</td>
+<td style="text-align: left;">EV_JOIN_TXCOMPLETE</td>
+<td style="text-align: left;">SCG_on_join_txcomplete</td>
+<td style="text-align: left;"><strong>Critical</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">4.1</td>
+<td style="text-align: left;">DlChannelReq redirect</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">MAC cmd handler</td>
+<td style="text-align: left;">Downlink w/ DlChannelReq</td>
+<td style="text-align: left;">channelDlFreq[] = 0 (sketch)</td>
+<td style="text-align: left;"><strong>Medium</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">4.2</td>
+<td style="text-align: left;">Link check re-join</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">LINK_CHECK_DEAD handler</td>
+<td style="text-align: left;">~32 uplinks w/o downlink</td>
+<td style="text-align: left;">LMIC_setLinkCheckMode(0)</td>
+<td style="text-align: left;"><strong>High</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">5.1</td>
+<td style="text-align: left;">RX2 DR override (join)</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">Join Accept processing</td>
+<td style="text-align: left;">Successful OTAA join</td>
+<td style="text-align: left;">SCG_init + SCG_on_joined</td>
+<td style="text-align: left;"><strong>Low</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">5.2</td>
+<td style="text-align: left;">RXParamSetupReq override</td>
+<td style="text-align: left;">lmic.c</td>
+<td style="text-align: left;">MAC cmd handler</td>
+<td style="text-align: left;">Downlink w/ RXParamSetupReq</td>
+<td style="text-align: left;">SCG_init sets initial RX2</td>
+<td style="text-align: left;"><strong>Low</strong></td>
+</tr>
+</tbody>
+</table>
+<h1 id="appendix-b-sketch-inventory"><strong>13. Appendix B — Sketch Inventory</strong></h1>
+<p>The following sketches have been produced or migrated as part of this project. All sketches in the “Raw Sensor” group were edited in-place; the OTAA and ABP SCG sketches are new files that leave the original custom sketches untouched.</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Sketch Folder</th>
+<th style="text-align: left;">Activation</th>
+<th style="text-align: left;">Sensors</th>
+<th style="text-align: left;">Payload (bytes)</th>
+<th style="text-align: left;">SCG Integration</th>
+<th style="text-align: left;">Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">MCCI_ttn_otaa_SCG</td>
+<td style="text-align: left;">OTAA</td>
+<td style="text-align: left;">None (test)</td>
+<td style="text-align: left;">—</td>
+<td style="text-align: left;">Full (init + on_joined + on_join_txcomplete + enforce)</td>
+<td style="text-align: left;">New file</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_abp_SCG</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">None (test)</td>
+<td style="text-align: left;">—</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">New file</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DHT22_MQ2</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DHT22 + MQ2</td>
+<td style="text-align: left;">8</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DHT22_MQ9</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DHT22 + MQ9</td>
+<td style="text-align: left;">8</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DHT22_Dust</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DHT22 + Dust</td>
+<td style="text-align: left;">6</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DHT22_MQ9_Dust</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DHT22+MQ9+Dust</td>
+<td style="text-align: left;">10</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DHT22_MQ2_Dust</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DHT22+MQ2+Dust</td>
+<td style="text-align: left;">10</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DS18B20_MQ9</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DS18B20 + MQ9</td>
+<td style="text-align: left;">6</td>
+<td style="text-align: left;">Full (init + enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DS18B20_MQ9_Characterization</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">DS18B20+MQ9</td>
+<td style="text-align: left;">Variable</td>
+<td style="text-align: left;">Channel-only (init + channel guard, no enforce)</td>
+<td style="text-align: left;">Edited in-place</td>
+</tr>
+<tr>
+<td style="text-align: left;">MCCI_ttn_Raw_DHT22_Dust_FakeTest</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">Fake DHT22+Dust</td>
+<td style="text-align: left;">6</td>
+<td style="text-align: left;">Full (init + enforce + setRadioConfig)</td>
+<td style="text-align: left;">New file</td>
+</tr>
+<tr>
+<td style="text-align: left;">lora_uno_compressed</td>
+<td style="text-align: left;">ABP</td>
+<td style="text-align: left;">Stubbed / None</td>
+<td style="text-align: left;">6</td>
+<td style="text-align: left;">Full (init + enforce + setRadioConfig)</td>
+<td style="text-align: left;">New file</td>
+</tr>
+<tr>
+<td style="text-align: left;">lora_uno_compressed_otaa</td>
+<td style="text-align: left;">OTAA</td>
+<td style="text-align: left;">Stubbed / None</td>
+<td style="text-align: left;">6</td>
+<td style="text-align: left;">Full (init + on_joined + on_join_txcomplete + enforce + setRadioConfig)</td>
+<td style="text-align: left;">New file</td>
+</tr>
+</tbody>
+</table>
+
+</body>
+</html>

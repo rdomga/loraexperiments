@@ -1,0 +1,148 @@
+{
+  "ruleChain": {
+    "name": "Stored Readings",
+    "type": "CORE",
+    "root": false,
+    "debugMode": false,
+    "configuration": null,
+    "additionalInfo": {
+      "description": "Saves the night readings a node stored in EEPROM and sent on port 3, at the time they were taken. No alarms, no AQI state."
+    }
+  },
+  "metadata": {
+    "firstNodeIndex": 0,
+    "nodes": [
+      {
+        "type": "org.thingsboard.rule.engine.filter.TbJsFilterNode",
+        "name": "Is stored frame?",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 0,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "return msg.type === 'stored' && typeof msg.stored_csv === 'string' && msg.stored_csv.length > 0;",
+          "tbelScript": "return msg.type == 'stored';"
+        },
+        "externalId": null,
+        "additionalInfo": {
+          "description": "Port 3 uplink carrying saved night readings (msg.type == 'stored' and a stored_csv string).",
+          "layoutX": 300,
+          "layoutY": 150
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.metadata.TbGetAttributesNode",
+        "name": "Latest night interval",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 0,
+        "configuration": {
+          "tellFailureIfAbsent": false,
+          "fetchTo": "METADATA",
+          "clientAttributeNames": [],
+          "sharedAttributeNames": [],
+          "serverAttributeNames": [],
+          "latestTsKeyNames": [
+            "night_interval_min"
+          ],
+          "getLatestValueWithTs": false
+        },
+        "externalId": null,
+        "additionalInfo": {
+          "description": "Fetches the device's latest night_interval_min telemetry into metadata. Only used for old v1 port 3 frames, which carry no interval.",
+          "layoutX": 460,
+          "layoutY": 150
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.transform.TbTransformMsgNode",
+        "name": "Explode stored readings",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 0,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "// Script for the \"Explode stored readings\" transform node (rule chain \"Stored Readings\").\n// Input: the telemetry message of a port 3 uplink, as mapped by tbConnector.json:\n//   msg.type = \"stored\", msg.stored_csv = \"seq,age_min,temp,hum,dust,gas,batt,vmask;seq,...\" (see payload.txt, decodeStored),\n//   msg.stored_boot_id, msg.stored_first_seq, msg.stored_uptime_min, msg.stored_count\n//   metadata.ts = arrival time of the uplink in ms (the connector uses TTN's received_at).\n// Output: an ARRAY of {ts, values}, one entry per saved reading, timestamped at the time of the reading, ready for a\n// Save Timeseries node. ES5 on purpose (pastes into a TB script node).\n//\n// Not copied from the live chain, on purpose: co_ppm and the AQI keys. co_ppm uses placeholder calibration that is still\n// changing, and the AQI keys come from a stateful hourly window (\"Get AQI State\" / \"Save AQI State\") that replayed\n// readings must not touch. dust_ugm3 and battery_voltage / battery_soc_pct are stateless and are reproduced here.\n\nvar MINUTE_MS = 60000;\n// Node's night reading interval, only used to place records whose age is unknown. Source, in order:\n//   1) msg.night_interval_min: byte 7 of a v2 port 3 frame, so the frame carries its own interval;\n//   2) metadata.night_interval_min: the latest status/frame value fetched by the 'Latest night interval' node (v1 frames);\n//   3) 60 minutes, the firmware default.\nvar nightMin = parseInt(msg.night_interval_min, 10);\nif (!(nightMin > 0)) { nightMin = parseInt(metadata.night_interval_min, 10); }\nif (!(nightMin > 0)) { nightMin = 60; }\nvar NIGHT_INTERVAL_MS = nightMin * MINUTE_MS;\n\n// Keep in sync with the \"Calculate Battery Voltage\" node of the Root Rule Chain.\nvar BATTERY_VCC_REF = 5.168;\nvar BATTERY_DIVIDER_RATIO = 1.996;\nvar SOC_EMPTY_V = 3.3;\nvar SOC_FULL_V = 4.2;\n\nvar arrival = parseInt(metadata.ts, 10);\nif (!(arrival > 0)) { arrival = new Date().getTime(); }\n\nfunction toInt(s) { return (s === '' || s === undefined) ? null : parseInt(s, 10); }\nfunction toNum(s) { return (s === '' || s === undefined) ? null : parseFloat(s); }\n\nvar rows = String(msg.stored_csv).split(';');\nvar recs = [];\nfor (var i = 0; i < rows.length; i++) {\n    var f = rows[i].split(',');\n    if (f.length < 8) { continue; }                          // malformed row: skip it, keep the rest\n    recs.push({\n        seq: toInt(f[0]), age: toInt(f[1]), temp: toNum(f[2]), hum: toNum(f[3]),\n        dust: toInt(f[4]), gas: toInt(f[5]), batt: toInt(f[6]), vmask: toInt(f[7]),\n        ts: null, estimated: 0\n    });\n}\n\n// 1) timestamps of records with a known age: the arrival time minus the age, rounded to the minute so that the same\n//    record arriving twice (a re-send) lands on almost the same timestamp\nvar firstKnown = -1;\nfor (var k = 0; k < recs.length; k++) {\n    if (recs[k].age !== null) {\n        recs[k].ts = Math.round((arrival - recs[k].age * MINUTE_MS) / MINUTE_MS) * MINUTE_MS;\n        if (firstKnown < 0) { firstKnown = k; }\n    }\n}\n// 2) records with an unknown age (stored before a reset, the node's clock restarted): space them by the night interval,\n//    backwards from the first record with a known age, or backwards from the arrival time if there is none. Flagged as estimated.\nfor (var j = 0; j < recs.length; j++) {\n    if (recs[j].ts !== null) { continue; }\n    recs[j].estimated = 1;\n    if (firstKnown >= 0) {\n        recs[j].ts = (j < firstKnown) ? recs[firstKnown].ts - (firstKnown - j) * NIGHT_INTERVAL_MS\n                                      : Math.min(arrival, recs[firstKnown].ts + (j - firstKnown) * NIGHT_INTERVAL_MS);\n    } else {\n        recs[j].ts = arrival - (recs.length - j) * NIGHT_INTERVAL_MS;\n    }\n}\n\nvar out = [];\nfor (var m = 0; m < recs.length; m++) {\n    var r = recs[m];\n    var v = {};\n    v.night_replayed = 1;                                    // lets queries and widgets tell replayed readings from live ones\n    v.night_seq = r.seq;\n    v.night_boot = msg.stored_boot_id;\n    v.night_ts_estimated = r.estimated;\n    if ((r.vmask & 1) && r.temp !== null) { v.temperature = r.temp; v.humidity = r.hum; }\n    v.dht22_valid = !!(r.vmask & 1);\n    v.dust_adc = r.dust;   v.dust_valid = !!(r.vmask & 2);\n    v.gas_adc = r.gas;     v.gas_valid = !!(r.vmask & 4);\n    v.battery_adc = r.batt; v.battery_valid = !!(r.vmask & 8);\n    if (v.dust_valid && r.dust !== null) {\n        v.dust_ugm3 = Math.round(Math.max(0, 170.0 * r.dust * (5.0 / 1023.0)) * 100) / 100;   // same formula as the AQI node\n    }\n    if (v.battery_valid && r.batt !== null) {\n        var voltage = r.batt * (BATTERY_VCC_REF / 1023.0) * BATTERY_DIVIDER_RATIO;\n        v.battery_voltage = Math.round(voltage * 100) / 100;\n        var soc = (voltage - SOC_EMPTY_V) / (SOC_FULL_V - SOC_EMPTY_V) * 100.0;\n        v.battery_soc_pct = Math.round(Math.max(0, Math.min(100, soc)));\n    }\n    out.push({ ts: r.ts, values: v });\n}\n\nreturn { msg: out, metadata: metadata, msgType: 'POST_TELEMETRY_REQUEST' };\n",
+          "tbelScript": "return {msg: msg, metadata: metadata, msgType: msgType};"
+        },
+        "externalId": null,
+        "additionalInfo": {
+          "description": "One {ts, values} entry per saved reading, timestamped at the reading time (arrival minus age).",
+          "layoutX": 700,
+          "layoutY": 150
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.telemetry.TbMsgTimeseriesNode",
+        "name": "Save stored readings",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 1,
+        "configuration": {
+          "defaultTTL": 0,
+          "useServerTs": false,
+          "processingSettings": {
+            "type": "ON_EVERY_MESSAGE"
+          }
+        },
+        "externalId": null,
+        "additionalInfo": {
+          "description": "Deliberately has no connection to Tiered Alarms: replayed night readings must not raise or clear alarms.",
+          "layoutX": 1040,
+          "layoutY": 150
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.action.TbLogNode",
+        "name": "Log explode failure",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 0,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "return 'Stored readings: could not explode the frame\\n' + JSON.stringify(msg) + '\\n' + JSON.stringify(metadata);",
+          "tbelScript": "return 'Stored readings: could not explode the frame\\n' + JSON.stringify(msg) + '\\n' + JSON.stringify(metadata);"
+        },
+        "externalId": null,
+        "additionalInfo": {
+          "description": "",
+          "layoutX": 1040,
+          "layoutY": 300
+        }
+      }
+    ],
+    "connections": [
+      {
+        "fromIndex": 0,
+        "toIndex": 1,
+        "type": "True"
+      },
+      {
+        "fromIndex": 1,
+        "toIndex": 2,
+        "type": "Success"
+      },
+      {
+        "fromIndex": 1,
+        "toIndex": 2,
+        "type": "Failure"
+      },
+      {
+        "fromIndex": 2,
+        "toIndex": 3,
+        "type": "Success"
+      },
+      {
+        "fromIndex": 2,
+        "toIndex": 4,
+        "type": "Failure"
+      }
+    ],
+    "ruleChainConnections": null
+  }
+}

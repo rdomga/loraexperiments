@@ -1,10 +1,6 @@
 // TTN Payload Decoder — MCCI_ttn_Raw_DHT22_Dust_Gas_SmartGated
 // Sensor: DHT22 + GP2Y1010AU0F optical dust sensor + gas sensor + battery divider
 //
-// Port 1 is unchanged from the AlwaysOn sketch (still 9 bytes, mode is NOT
-// included there by design). Port 2 grows by one byte to carry the current
-// operating mode — see the layout below.
-//
 // Pure bytes -> typed raw values. No derived/computed fields (no voltage,
 // no density/ppm conversion) — that logic intentionally lives downstream in
 // ThingsBoard, not here, so nothing calculated on the TTN side can go stale
@@ -20,14 +16,11 @@
 //   [9]    Reading boot id       uint8
 //   [10-11] Reading sequence     uint16
 //   [12-13] Reading uptime min   uint16  (minutes into that boot)
-// The last five bytes identify the stored reading this frame reports. Old
-// 9-byte frames still decode; they simply carry no anchor fields.
 //
-// Port 2 payload layout (26 bytes, status; grows to 29 on 2026-09-10, to 34 and then 42 on 2026-11-02, see the length-guarded blocks in decodeStatus) — widened 2026-09-10 per
-// Field_Diagnostics_And_Remote_Configuration_2026-09-07.md §7.1/§7.2. Same
-// field order/sizes as port 1 for the shared fields, plus a reset-reason
-// byte, an operating-mode byte, and (bytes 17-25) the config tunables that
-// were previously write-only via downlink with no readback:
+// Port 2 payload layout (46 bytes, status):
+//   Field order/sizes match port 1 for shared fields, plus reset reason,
+//   operating mode, config/radio readback, battery strategy/buffer state,
+//   last sag event, and uptime/anchor_seq:
 //   [0-1]   TX interval    uint16  → seconds
 //   [2-5]   seqnoUp        uint32  → uplink counter
 //   [6-7]   Temperature    int16  ×10   → °C  (0x8000 = sensor failure)
@@ -179,6 +172,7 @@ function decodeSensor(bytes) {
 }
 
 function decodeStatus(bytes) {
+  if (bytes.length < 46) return { valid_frame: false };
   var interval  = (bytes[0] << 8) | bytes[1];
 
   var seqno = (bytes[2] * 16777216) +
@@ -240,111 +234,77 @@ function decodeStatus(bytes) {
   result.ping_reason_name = ["RATIO", "DEADMAN", "VERIFY", "MANUAL", "INIT"][pingReason] || "UNKNOWN";
   result.profile_saved = profileSaved;
 
-  // Bytes 17-25: config-tunable readback, added 2026-09-10. Guarded on
-  // length so a node still running pre-widening firmware (17-byte frame)
-  // decodes cleanly instead of reading undefined/NaN off the end of the
-  // array during the field rollout window.
-  if (bytes.length >= 26) {
-    result.sensor_mask       = bytes[17];
-    result.gas_warmup_s      = (bytes[18] << 8) | bytes[19];
-    result.batt_low          = bytes[20] * 2;
-    result.batt_recover      = bytes[21] * 2;
-    result.batt_critical     = bytes[22] * 2;
-    result.batt_psave        = bytes[23] * 2;
-    result.batt_psave_recover = bytes[24] * 2;
-    result.ping_ratio        = bytes[25];
-  }
+  result.sensor_mask        = bytes[17];
+  result.gas_warmup_s       = (bytes[18] << 8) | bytes[19];
+  result.batt_low           = bytes[20] * 2;
+  result.batt_recover       = bytes[21] * 2;
+  result.batt_critical      = bytes[22] * 2;
+  result.batt_psave         = bytes[23] * 2;
+  result.batt_psave_recover = bytes[24] * 2;
+  result.ping_ratio         = bytes[25];
 
-  // Bytes 26-28: radio config readback, added 2026-09-10 (§8.3). Same
-  // length-guard reasoning as bytes 17-25 above, separate check since a
-  // node could in principle ship the §7.1 widen without this one.
-  if (bytes.length >= 29) {
-    var DR_TO_SF = [12, 11, 10, 9, 8, 7]; // EU868: DR0=SF12 ... DR5=SF7
-    result.radio_dr  = bytes[26];
-    result.sf        = DR_TO_SF[bytes[26]] || 0;
-    result.tx_power  = bytes[27];
-    result.channel   = bytes[28];
-  }
+  var DR_TO_SF = [12, 11, 10, 9, 8, 7]; // EU868: DR0=SF12 ... DR5=SF7
+  result.radio_dr  = bytes[26];
+  result.sf        = DR_TO_SF[bytes[26]] || 0;
+  result.tx_power  = bytes[27];
+  result.channel   = bytes[28];
 
-  // Bytes 29-33 and bits 5-6 of byte 16: battery strategy and its declared state, added 2026-11-02. Older nodes send 29
-  // bytes and leave these fields out. Byte 16 bits 5-6: 0 NONE (depletion run), 1 LADDER (POWERSAVE/LOW/CRITICAL), 2 NIGHT.
-  //   [29]  guard state bitfield: bit0 night mode active, bit1 CRITICAL floor, bit2 ladder LOW, bit3 ladder POWERSAVE,
-  //         bit4 confirming morning read (night mode, first good read seen)
-  //   [30]  night enter threshold / 2 (raw ADC)    [31] night exit threshold / 2    [32] night interval, minutes
-  //   [33]  saved readings waiting to be sent (capped at 255)
-  if (bytes.length >= 34) {
-    var STRATEGY_NAMES = ["none", "ladder", "storage"];
-    var strat = (modeByte >> 5) & 0x03;
-    result.battery_strategy        = STRATEGY_NAMES[strat] || "unknown";
-    result.sag_active              = !!(bytes[29] & 0x01);
-    result.critical_floor          = !!(bytes[29] & 0x02);
-    result.ladder_low              = !!(bytes[29] & 0x04);
-    result.ladder_powersave        = !!(bytes[29] & 0x08);
-    result.sag_exit_pending        = !!(bytes[29] & 0x10);
-    result.outage_fallback_active  = !!(bytes[29] & 0x20);
-    result.sag_enter_adc           = bytes[30] * 2;
-    result.sag_exit_adc            = bytes[31] * 2;
-    result.sag_interval_min        = bytes[32];
-    result.buffer_unsent           = bytes[33];
-  }
+  var STRATEGY_NAMES = ["none", "ladder", "storage"];
+  var strat = (modeByte >> 5) & 0x03;
+  result.battery_strategy        = STRATEGY_NAMES[strat] || "unknown";
+  result.sag_active              = !!(bytes[29] & 0x01);
+  result.critical_floor          = !!(bytes[29] & 0x02);
+  result.ladder_low              = !!(bytes[29] & 0x04);
+  result.ladder_powersave        = !!(bytes[29] & 0x08);
+  result.sag_exit_pending        = !!(bytes[29] & 0x10);
+  result.outage_fallback_active  = !!(bytes[29] & 0x20);
+  result.sag_enter_adc           = bytes[30] * 2;
+  result.sag_exit_adc            = bytes[31] * 2;
+  result.sag_interval_min        = bytes[32];
+  result.buffer_unsent           = bytes[33];
 
-  // Bytes 34-41: the latest energy sag event
-  if (bytes.length >= 42) {
-    var sAgo = (bytes[35] << 8) | bytes[36];
-    var eAgo = (bytes[37] << 8) | bytes[38];
-    result.node_boot_id            = bytes[34];
-    result.sag_last_start_ago_min  = (sAgo === 0xFFFF) ? null : sAgo;
-    result.sag_last_end_ago_min    = (eAgo === 0xFFFF) ? null : eAgo;
-    result.sag_events_since_boot   = bytes[39];
-    result.buffer_records_lost     = (bytes[40] << 8) | bytes[41];
-  }
+  var sAgo = (bytes[35] << 8) | bytes[36];
+  var eAgo = (bytes[37] << 8) | bytes[38];
+  result.node_boot_id            = bytes[34];
+  result.sag_last_start_ago_min  = (sAgo === 0xFFFF) ? null : sAgo;
+  result.sag_last_end_ago_min    = (eAgo === 0xFFFF) ? null : eAgo;
+  result.sag_events_since_boot   = bytes[39];
+  result.buffer_records_lost     = (bytes[40] << 8) | bytes[41];
 
-  // Bytes 42-45: Port 2 anchor, added 2026-11-15. The meaning of bytes 42..45
-  // is decided by the frame length, not a version byte: 46 bytes carries the
-  // new uptime/next-seq pair, 43 bytes is old firmware's single outage_unsent.
-  if (bytes.length >= 46) {
-    result.uptime_min    = (bytes[42] << 8) | bytes[43];
-    result.anchor_seq    = (bytes[44] << 8) | bytes[45];
-    result.outage_unsent = result.buffer_unsent;
-  } else if (bytes.length >= 43) {
-    result.outage_unsent = bytes[42];
-  }
+  result.uptime_min    = (bytes[42] << 8) | bytes[43];
+  result.anchor_seq    = (bytes[44] << 8) | bytes[45];
 
   return result;
 }
 
 // Port 3 (stored readings): readings stored in EEPROM during energy sag or link outage.
-// Layout:
-//   [0]    format version: 0x01..0x03 legacy, 0x04..0x07 current
-//            0x04 same-boot sag, 0x05 same-boot outage,
-//            0x06 cross-boot sag, 0x07 cross-boot outage
-//   [1]    sending boot id  uint8
+// Layout (8-byte header + n * 11-byte records):
+//   [0]    format version: 0x04 same-boot sag, 0x05 same-boot outage,
+//                          0x06 cross-boot sag, 0x07 cross-boot outage
+//   [1]    boot id          uint8   sender_boot_id (0x04..0x05) or record_boot_id (0x06..0x07)
 //   [2-3]  sender uptime    uint16  minutes since that boot
 //   [4-5]  first seq        uint16  sequence number of record 0
 //   [6]    count n          uint8
-//   [7]    stored interval  uint8   minutes between stored readings (0x02+)
-//   then n records of 11 bytes: 9 bytes telemetry + 2 bytes record time/age
-//     v4..v7: record time  uint16, 0xFF00..0xFFFF = unknown
-//     v1..v3: age_min      uint16, 0xFFFF = unknown
+//   [7]    stored interval  uint8   minutes between stored readings
+//   then n records of 11 bytes: 9 bytes telemetry + 2 bytes record time (uint16, >=0xFF00 = unknown)
 function decodeStored(bytes) {
   var result = { type: "stored", valid_frame: false, records: [] };
-  if (bytes.length < 7) return result;                 // smallest header is 0x01
+  if (bytes.length < 8) return result;
   var ver = bytes[0];
-  if (ver < 0x01 || ver > 0x07) return result;         // 0x01..0x03 legacy, 0x04..0x07 new
-  var hdr = (ver === 0x01) ? 7 : 8;
-  if (bytes.length < hdr) return result;
+  if (ver < 0x04 || ver > 0x07) return result;
+  var hdr = 8;
   var n = bytes[6];
   if (n === 0) return result;
   if (bytes.length < hdr + n * 11) return result;
 
   result.valid_frame = true;
   result.frame_version = ver;
-  result.stored_regime = (ver === 0x03 || ver === 0x05 || ver === 0x07) ? "outage" : "energy_sag";
-  if (hdr === 8) {
-    result.stored_interval_min = bytes[7];
-    result.sag_interval_min = bytes[7];
-  }
+  result.stored_regime = (ver === 0x05 || ver === 0x07) ? "outage" : "energy_sag";
+  result.stored_interval_min = bytes[7];
   result.boot_id = bytes[1];
+  if (ver === 0x06 || ver === 0x07) {
+    result.record_boot_id = bytes[1];
+  }
   result.sender_uptime_min = (bytes[2] << 8) | bytes[3];
   var first = (bytes[4] << 8) | bytes[5];
   result.first_seq = first;
@@ -354,15 +314,10 @@ function decodeStored(bytes) {
     var rec = decodeSensor(bytes.slice(off, off + 9));
     var rawTime = (bytes[off + 9] << 8) | bytes[off + 10];
     rec.seq = (first + i) % 0xFF00;
-    if (ver >= 0x04) {
-      rec.rec_t_min = (rawTime >= 0xFF00) ? null : rawTime;
-      rec.age_min = ((ver === 0x04 || ver === 0x05) && rec.rec_t_min !== null)
-        ? Math.max(0, result.sender_uptime_min - rec.rec_t_min)
-        : null;
-    } else {
-      rec.rec_t_min = null;
-      rec.age_min = (rawTime === 0xFFFF) ? null : rawTime;
-    }
+    rec.rec_t_min = (rawTime >= 0xFF00) ? null : rawTime;
+    rec.age_min = ((ver === 0x04 || ver === 0x05) && rec.rec_t_min !== null)
+      ? Math.max(0, result.sender_uptime_min - rec.rec_t_min)
+      : null;
     result.records.push(rec);
   }
 
@@ -397,11 +352,10 @@ function Decoder(bytes, port) {
   if (port === 2) return decodeStatus(bytes);
   if (port === 3) return decodeStored(bytes);
 
+  if (bytes.length < 14) return { valid_frame: false };
   var out = decodeSensor(bytes);
-  if (out && bytes.length >= 14) {
-    out.p1_boot_id    = bytes[9];
-    out.reading_seq   = (bytes[10] << 8) | bytes[11];
-    out.p1_uptime_min = (bytes[12] << 8) | bytes[13];
-  }
+  out.p1_boot_id    = bytes[9];
+  out.reading_seq   = (bytes[10] << 8) | bytes[11];
+  out.p1_uptime_min = (bytes[12] << 8) | bytes[13];
   return out;
 }

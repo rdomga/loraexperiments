@@ -32,7 +32,7 @@ static EnergyEvent energyGuard_update(int battRaw, bool battValid) {
     }
 
     if (!readingStore_active()) {
-        if (battValid && battRaw < (int)g_sagEnterAdc) {
+        if ((battValid && battRaw < (int)g_sagEnterAdc) || battRaw >= BATTERY_ADC_MAX_VALID) {
             readingStore_noteEnter();
             return ENERGY_SAG_ENTERED;
         }
@@ -53,14 +53,19 @@ static EnergyEvent energyGuard_update(int battRaw, bool battValid) {
 
 bool energyGuard_allowBurst(int battRaw, bool battValid) {
     if (readingStore_active()) return false;
+    if (battRaw >= BATTERY_ADC_MAX_VALID) return false;
     if (battValid && battRaw < (int)g_sagExitAdc) return false;
     return true;
 }
 
 bool energyGuard_bootSilent(int battRaw, bool battValid) {
-    bool belowCrit = (battValid && battRaw < g_battCritical);
+    bool belowCrit    = (battValid && battRaw < g_battCritical);
+    bool boostSagHigh = (battRaw >= BATTERY_ADC_MAX_VALID);
     bool silent = false;
-    if (readingStore_active() || (battValid && battRaw < (int)g_sagEnterAdc)) {
+    if (readingStore_active() || (battValid && battRaw < (int)g_sagEnterAdc) || boostSagHigh) {
+        if (boostSagHigh && !readingStore_active()) {
+            Serial.println(F("Boot battery >= max valid (boost rail sag) - entering silent sag boot"));
+        }
         readingStore_noteEnter();
         bootBurstFramesLeft = 0;
         silent = true;

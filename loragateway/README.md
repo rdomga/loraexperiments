@@ -1,13 +1,13 @@
 # LoRa gateway installer
 
-`lora_gateway-github-py3-20261119.zip` is the current gateway distribution.
+`lora_gateway-github-py3-20261127.zip` is the current gateway distribution.
 It targets a Raspberry Pi 2 or 3 with an SX127x radio (tested with a Dragino
 LoRa Shield 1.4) on Raspberry Pi OS Buster or Debian 13 (Trixie).
 
 On the Pi, logged in as the account that will own the gateway:
 
     cd ~
-    unzip lora_gateway-github-py3-20261119.zip
+    unzip lora_gateway-github-py3-20261127.zip
     cd lora_gateway
     sudo ./install.sh
 

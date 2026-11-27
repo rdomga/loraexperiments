@@ -22,7 +22,6 @@
 #define BATTERY_STRATEGY_NONE    0
 #define BATTERY_STRATEGY_LADDER  1
 #define BATTERY_STRATEGY_STORAGE 2
-#define BATTERY_STRATEGY_NIGHT   BATTERY_STRATEGY_STORAGE // backward compatibility alias
 #ifndef BATTERY_STRATEGY
 #define BATTERY_STRATEGY BATTERY_STRATEGY_STORAGE
 #endif
@@ -64,7 +63,7 @@ const unsigned DEFAULT_TX_INTERVAL = 3600; // uy1-mega-2 field setting: 60-minut
 
 // Gap between Port 3 batches in a drain. 300 s keeps confirmed-downlink and
 // airtime pressure spread out; +/-20% jitter avoids lock-step retries.
-#define FLUSH_SPACING_DEFAULT_S 300UL
+#define FLUSH_SPACING_DEFAULT_S 90UL
 const unsigned MAX_SLEEP_MINUTES   = 120;
 
 #define BOOT_BURST_FRAME_COUNT  9
@@ -84,6 +83,16 @@ const unsigned MAX_SLEEP_MINUTES   = 120;
 // rides out two consecutive lost ACKs. The LENERR init retries are separate:
 // they never reach the air, so they can afford three.
 #define INIT_PHASE_ACK_RETRIES     2
+
+// Firmware revision marker stored in EEPROM byte 44 (unused gap between
+// SAG_PARAMS 37..43 and READING_MAGIC 62). Bump on each field release so the
+// first boot after flashing clears latched sag/outage flags once and runs
+// INIT_PHASE immediately without touching stored readings, boot_id, seqnoUp,
+// or committed config. Override with -DFW_REV=<n> for bench tests.
+#define FW_REV_EEPROM_ADDR         44
+#ifndef FW_REV
+#define FW_REV                     1
+#endif
 
 extern unsigned TX_INTERVAL;
 extern unsigned g_flushSpacingS;

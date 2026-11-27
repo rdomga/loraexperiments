@@ -399,13 +399,13 @@ uint8_t readingStore_buildFrame(uint8_t* buf, uint8_t maxLen, uint16_t nowMin, u
     // Header layout:
     // [0] version: 0x04 same-boot sag, 0x05 same-boot outage,
     //              0x06 cross-boot sag, 0x07 cross-boot outage
-    // [1] sending boot id
+    // [1] same-boot: sending boot id; cross-boot (0x06/0x07): record boot id (firstBoot)
     // [2-3] sender uptime min
     // [4-5] first sequence number
     // [6] count
     // [7] interval minutes
     buf[0] = (uint8_t)(0x04 | (isOutage ? 0x01 : 0x00) | (sameBoot ? 0x00 : 0x02));
-    buf[1] = senderBoot;
+    buf[1] = sameBoot ? senderBoot : firstBoot;
     buf[2] = highByte(nowMin); buf[3] = lowByte(nowMin);
     buf[4] = highByte(first);  buf[5] = lowByte(first);
     buf[6] = n;

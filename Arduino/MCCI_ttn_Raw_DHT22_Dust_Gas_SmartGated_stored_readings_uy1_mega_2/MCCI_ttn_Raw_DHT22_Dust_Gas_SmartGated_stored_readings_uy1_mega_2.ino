@@ -30,6 +30,10 @@ static void scheduleNextCadence();
 
 bool g_linkOnline = true;
 static bool s_outageDrainPending = false;
+static bool s_fwRevClearedOutage = false;
+
+static_assert(FW_REV_EEPROM_ADDR >= SAG_PARAMS_ADDR + 7 && FW_REV_EEPROM_ADDR < READING_MAGIC_ADDR,
+              "FW_REV_EEPROM_ADDR must sit in the unused gap between SAG_PARAMS (37..43) and READING_MAGIC (62)");
 
 // True from the moment a Port 3 frame is queued in LMIC until its
 // EV_TXCOMPLETE/EV_TXCANCELED. LMIC can hold the frame for tens of seconds
@@ -573,7 +577,8 @@ void onEvent(ev_t ev) {
             } else if (ipRes == INIT_PHASE_COMPLETED) {
                 if (ack) {
                     g_linkOnline = true;
-                    if (my_eeprom.outage_fallback_active == 1) {
+                    if (my_eeprom.outage_fallback_active == 1 || s_fwRevClearedOutage) {
+                        s_fwRevClearedOutage = false;
                         config_set_outage_fallback_active(0);
                         s_outageDrainPending = (readingStore_unsentCount() > 0);
                         Serial.println(F("Reboot recovery ACK: Buffer preserved for drain"));
@@ -1304,7 +1309,7 @@ void setup() {
 
     // Read the checkpoint left by the previous boot's active-work window
     // before we overwrite it below. BUSY means that window never closed
-    // cleanly — see EEPROM_HANG_CHECKPOINT_ADDR above. mcusr_boot's WDRF bit
+    // cleanly — see EEPROM_CHECKPOINT_BASE in node_config.h. mcusr_boot's WDRF bit
     // reads 0x00 on every boot on this board (bootloader clears it before
     // the sketch runs), so it can't be trusted to tell a watchdog reset from
     // any other kind. Consume both markers immediately so a later, unrelated
@@ -1435,10 +1440,25 @@ void setup() {
     bootBurstFramesLeft = BOOT_BURST_FRAME_COUNT;
 #endif // POWER_SAVE_ENABLED — depletion test: always proceed into the normal boot path regardless of boot-time battery level
 
+    // Fresh firmware revision check: clear latched sag/outage flags once after flashing so the
+    // operator gets an immediate INIT_PHASE probe without losing stored readings, boot_id, or seqnoUp.
+#ifdef WITH_EEPROM
+    uint8_t prevFwRev = EEPROM.read(FW_REV_EEPROM_ADDR);
+    bool fwRevChanged = (prevFwRev != (uint8_t)FW_REV);
+    if (fwRevChanged) {
+        Serial.print(F("Firmware revision changed (EEPROM="));
+        Serial.print(prevFwRev);
+        Serial.print(F(" -> FW_REV="));
+        Serial.print((uint8_t)FW_REV);
+        Serial.println(F("): clearing latched sag/outage flags for fresh boot probe"));
+        EEPROM.update(SAG_FLAG_ADDR, 0x00);
+    }
+#endif
+
     // Boot on weak cell must stay silent: the usual boot sequence (confirmed init ping, 9-frame burst)
     // is the heaviest TX load the node has, and a reset loop on a weak cell would repeat it every boot.
-    bool belowCrit = (g_batt_valid && battRaw < g_battCritical);
-    readingStore_begin(!belowCrit);
+    // Lazy boot_id allocation avoids burning EEPROM on repeated dawn brownouts before any append/anchor.
+    readingStore_begin(false);
     weakBatteryBootSilent = energyGuard_bootSilent(battRaw, g_batt_valid);
 
     sensorManager_init();
@@ -1507,6 +1527,13 @@ void setup() {
         config_init_defaults(TX_INTERVAL);
         Serial.println(F("EEPROM: initialized"));
     }
+    if (fwRevChanged) {
+        if (my_eeprom.outage_fallback_active == 1) {
+            s_fwRevClearedOutage = true;
+            config_set_outage_fallback_active(0);
+        }
+        EEPROM.update(FW_REV_EEPROM_ADDR, (uint8_t)FW_REV);
+    }
     if (my_eeprom.outage_fallback_active == 1) {
         g_linkOnline = false;
     }
@@ -1539,6 +1566,15 @@ void setup() {
         scheduleNextCadence();
         return;
     }
+
+#ifdef WITH_EEPROM
+    if (my_eeprom.outage_fallback_active == 1) {
+        bootBurstFramesLeft = 0;
+        Serial.println(F("OUTAGE FALLBACK BOOT: no init ping, no boot burst - going straight to fallback schedule"));
+        scheduleNextCadence();
+        return;
+    }
+#endif
 
     // One-time random stagger before the very first TX, so a batch of nodes
     // powered on together don't stay phase-correlated through the boot burst

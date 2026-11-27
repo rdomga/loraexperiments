@@ -69,7 +69,8 @@ int main() {
             uint8_t n = buf[6];
             uint16_t first = (buf[4] << 8) | buf[5];
             CHECK(len == 8 + n * 11);
-            CHECK(buf[0] == 0x06); // Cross-boot sag frame version 0x06
+            CHECK(buf[0] == 0x06); // Cross-boot sag frame version 0x06 (record_boot_id in [1])
+            CHECK(buf[1] == 0);    // Stored record boot_id (0), not senderBoot (111)
             CHECK(buf[7] == 60);   // 3600 s / 60 = 60 min
             CHECK(len <= 111);
             CHECK(first == expectSeq);
@@ -244,6 +245,47 @@ int main() {
         CHECK(buf[6] == 1);
         CHECK(buf[17] == 0xFF);                     // first record tMin high byte
         CHECK(buf[18] == 0xFF);                     // first record tMin low byte
+    }
+
+    // 10. Lazy boot_id allocation (readingStore_begin(false)) + 0x09 cross-boot outage
+    {
+        FakeEEPROM f;
+        EEPROM = f;
+        reboot(true);                               // format ring, boot 0
+        uint8_t b0 = readingStore_bootId();
+
+        // Repeated brownout resets with begin(false) must not increment SAG_BOOT_ADDR
+        for (int i = 0; i < 10; i++) {
+            reboot(false);
+            CHECK(readingStore_bootId() == b0);
+            CHECK(EEPROM.read(SAG_BOOT_ADDR) == b0);
+        }
+
+        // First append allocates exactly one new boot_id (b0 + 1)
+        readingStore_append(rec(1), RECORD_STATE_OUTAGE_PERSISTENT);
+        uint8_t b1 = readingStore_bootId();
+        CHECK(b1 == (uint8_t)(b0 + 1));
+        CHECK(EEPROM.read(SAG_BOOT_ADDR) == b1);
+
+        // Subsequent append in same boot keeps b1
+        readingStore_append(rec(2), RECORD_STATE_OUTAGE_PERSISTENT);
+        CHECK(readingStore_bootId() == b1);
+
+        // Next boot with begin(false) stays at b1 until anchor() allocates b1 + 1
+        reboot(false);
+        CHECK(EEPROM.read(SAG_BOOT_ADDR) == b1);
+        ReadingAnchor anc = readingStore_anchor();
+        CHECK(anc.boot == (uint8_t)(b1 + 1));
+        CHECK(EEPROM.read(SAG_BOOT_ADDR) == anc.boot);
+
+        // Cross-boot outage frame uses version 0x07 with record_boot_id (b1) in buf[1]
+        uint8_t buf[READING_FRAME_MAX_BYTES];
+        uint8_t len = readingStore_buildFrame(buf, 111, 10, 1800);
+        CHECK(len == 8 + 2 * 11);
+        CHECK(buf[0] == 0x07);
+        CHECK(buf[1] == b1);
+        readingStore_markFramed();
+        CHECK(readingStore_unsentCount() == 0);
     }
 
     printf(fails ? "\n%d CHECK(S) FAILED\n" : "\nall unified reading store host checks passed (100%%)\n", fails);

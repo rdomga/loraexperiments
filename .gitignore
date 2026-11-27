@@ -13,7 +13,7 @@ Arduino/discard/
 # Gateway live directory and older zips: track ONLY the sanitized public installer zip
 lora_gateway/
 *.zip
-!loragateway/lora_gateway-github-py3-20261119.zip
+!loragateway/lora_gateway-github-py3-20261127.zip
 *.deb
 
 # Secrets, device keys, and shell completions

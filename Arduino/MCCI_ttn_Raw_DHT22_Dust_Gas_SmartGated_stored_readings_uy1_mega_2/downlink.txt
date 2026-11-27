@@ -4,7 +4,7 @@ function encodeDownlink(input) {
 
   // Priority: reset > restart > save_eeprom > mode > tx > burst > ping > sleep >
   // interval > flush_spacing > sf > tx_power > gas_warmup > ping_ratio >
-  // sensor_mask > battery_thresholds > commit > night_* > channel — each field is
+  // sensor_mask > battery_thresholds > commit > sag_* / buffer_* > channel — each field is
   // independent, so this order only matters if a caller sends more than one at once.
   if (data.reset === true) {
     cmd = "/@Z#";
@@ -22,7 +22,7 @@ function encodeDownlink(input) {
     }
     cmd = "/@M" + mode + "#";
   }
-  else if (data.tx_now === true || data.txNow === true) {
+  else if (data.tx_now === true) {
     cmd = "/@T#";
   }
   else if (data.burst !== undefined) {
@@ -115,37 +115,37 @@ function encodeDownlink(input) {
   else if (data.commit === true) {
     cmd = "/@CP#";
   }
-  else if (data.sag_thresholds !== undefined || data.night_thresholds !== undefined) {
+  else if (data.sag_thresholds !== undefined) {
     // /@H<enter>,<exit># - STORAGE battery strategy builds only
-    var nt = data.sag_thresholds !== undefined ? data.sag_thresholds : data.night_thresholds;
+    var nt = data.sag_thresholds;
     var nEnter = Number(nt.enter), nExit = Number(nt.exit);
     if (isNaN(nEnter) || isNaN(nExit) || nEnter < 6 || nExit > 439 || nExit < nEnter + 4) {
       return { errors: ["Invalid sag_thresholds - enter >= 6, exit <= 439 and exit >= enter + 4 (raw ADC)"] };
     }
     cmd = "/@H" + nEnter + "," + nExit + "#";
   }
-  else if (data.sag_interval !== undefined || data.night_interval !== undefined) {
-    var nInt = Number(data.sag_interval !== undefined ? data.sag_interval : data.night_interval);
+  else if (data.sag_interval !== undefined) {
+    var nInt = Number(data.sag_interval);
     if (isNaN(nInt) || nInt < 30 || nInt > 14400) {
       return { errors: ["Invalid sag_interval (30-14400 s)"] };
     }
     cmd = "/@L" + nInt + "#";
   }
-  else if (data.sag_override !== undefined || data.night_override !== undefined) {
-    var nOvr = Number(data.sag_override !== undefined ? data.sag_override : data.night_override);
+  else if (data.sag_override !== undefined) {
+    var nOvr = Number(data.sag_override);
     if (isNaN(nOvr) || nOvr < 0 || nOvr > 2) {
       return { errors: ["Invalid sag_override (0=force off, 1=force on, 2=automatic)"] };
     }
     cmd = "/@O" + nOvr + "#";
   }
-  else if (data.buffer_resend !== undefined || data.night_resend !== undefined) {
-    var nSeq = Number(data.buffer_resend !== undefined ? data.buffer_resend : data.night_resend);
+  else if (data.buffer_resend !== undefined) {
+    var nSeq = Number(data.buffer_resend);
     if (isNaN(nSeq) || nSeq < 0 || nSeq > 65534) {
       return { errors: ["Invalid buffer_resend (sequence number 0-65534)"] };
     }
     cmd = "/@U" + nSeq + "#";
   }
-  else if (data.buffer_discard !== undefined || data.night_discard !== undefined) {
+  else if (data.buffer_discard !== undefined) {
     cmd = "/@D#";
   }
   else if (data.channel !== undefined) {
@@ -187,10 +187,9 @@ function decodeDownlink(input) {
 }
 
 // {"interval": 60}   // set uplink period (seconds, min 30)
-// {"flush_spacing": 300} // /@G — gap between Port 3 batches in a drain, seconds (15-3600, default 300)
+// {"flush_spacing": 90} // /@G — gap between Port 3 batches in a drain, seconds (15-3600, default 90)
 // {"sleep": 5}       // sleep device (minutes, max 120)
 // {"tx_now": true}   // force immediate uplink
-// {"txNow": true}    // same as tx_now (alias)
 // {"burst": true}    // start a burst at the default 9 frames / 90s spacing
 // {"burst": {"count": 20, "interval": 30}}  // parameterized burst (count 1-250, interval 30-3600s);
 //                     // under 90s has caused mid-burst brownouts on solar-only power
@@ -221,10 +220,10 @@ function decodeDownlink(input) {
 // once §3.8's radio-verify-via-ping confirms the new value actually took; {"commit": true}
 // doesn't touch them. channel (§3.6) is RAM-only with no commit path at all yet — not
 // wired into either mechanism — so it always resets to the compiled-in default on reboot.
-// NIGHT battery strategy builds only (BATTERY_STRATEGY_NIGHT); other builds answer "Unknown command" and ignore these:
-// {"night_thresholds": {"enter": 375, "exit": 388}}  // /@H - store below enter, resume at or above exit on 2 reads
+// STORAGE battery strategy builds only:
+// {"sag_thresholds": {"enter": 375, "exit": 388}}  // /@H - store below enter, resume at or above exit on 2 reads
 //                               // (raw ADC 6-439, exit >= enter + 4). RAM-only until {"commit": true}
-// {"night_interval": 3600}     // /@L - reading interval while storing, seconds (30-14400). RAM-only until commit
-// {"night_override": 1}        // /@O - 0 = force night off, 1 = force night on, 2 = automatic. RAM-only
-// {"night_discard": true}     // /@D - mark every unsent saved record as sent WITHOUT transmitting (drops stale records)
-// {"night_resend": 120}        // /@U - mark saved records from this sequence number on as unsent; re-sent after the next uplink
+// {"sag_interval": 3600}       // /@L - reading interval while storing, seconds (30-14400). RAM-only until commit
+// {"sag_override": 1}          // /@O - 0 = force off, 1 = force on, 2 = automatic. RAM-only
+// {"buffer_discard": true}     // /@D - mark every unsent saved record as sent WITHOUT transmitting (drops stale records)
+// {"buffer_resend": 120}       // /@U - mark saved records from this sequence number on as unsent; re-sent after the next uplink

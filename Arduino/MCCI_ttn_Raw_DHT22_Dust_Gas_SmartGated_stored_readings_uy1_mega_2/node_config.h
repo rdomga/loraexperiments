@@ -6,7 +6,6 @@
 #include "build_config.h"
 #include "payload_encoder.h"
 
-#define EEPROM_HANG_CHECKPOINT_ADDR 32   // legacy single-byte slot, now unused
 #define HANG_CHECKPOINT_IDLE        0x00
 #define HANG_CHECKPOINT_BUSY        0xBB
 
@@ -46,7 +45,7 @@ struct lmic_eeprom_t {
     uint8_t  radio_channel;
     uint8_t  outage_fallback_active;
 };
-static_assert(sizeof(lmic_eeprom_t) <= EEPROM_HANG_CHECKPOINT_ADDR, "lmic_eeprom_t overflow into hang checkpoint");
+static_assert(sizeof(lmic_eeprom_t) <= 35, "lmic_eeprom_t overflow into SAG_BOOT_ADDR");
 
 extern lmic_eeprom_t my_eeprom;
 extern uint8_t g_resetReasonByte;

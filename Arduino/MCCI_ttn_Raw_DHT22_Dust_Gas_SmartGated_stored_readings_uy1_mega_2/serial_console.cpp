@@ -104,7 +104,9 @@ bool serialConsole_poll(DownlinkResult& outResult) {
             if (serialCmdLen > 4 && serialCmdBuf[0] == '/' && serialCmdBuf[1] == '@' && serialCmdBuf[2] == 'Y') {
                 serialCmdBuf[serialCmdLen - 1] = 0;
                 extern int g_benchAdc;
+                extern uint16_t g_benchAdcMagic;
                 g_benchAdc = atoi(serialCmdBuf + 3);
+                g_benchAdcMagic = 0xB5A7U;
                 Serial.print(F("BENCH: battery ADC set to ")); Serial.println(g_benchAdc);
                 serialCmdLen = 0;
                 return false;

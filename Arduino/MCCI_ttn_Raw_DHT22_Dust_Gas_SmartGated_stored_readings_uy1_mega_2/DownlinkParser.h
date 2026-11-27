@@ -82,15 +82,15 @@
 //                    committed via /@CP#. See Field_Diagnostics_And_Remote_
 //                    Configuration_2026-09-07.md §3.3.
 //
-// NIGHT battery strategy only (BATTERY_STRATEGY in build_config.h; other builds answer "Unknown command"):
-//   /@H<enter>,<exit>#  — night mode thresholds (raw ADC, 6-439): store below <enter>, resume at or above <exit> on two
+// STORAGE battery strategy only (BATTERY_STRATEGY in build_config.h; other builds answer "Unknown command"):
+//   /@H<enter>,<exit>#  — energy-sag thresholds (raw ADC, 6-439): store below <enter>, resume at or above <exit> on two
 //                    consecutive reads. exit must be at least 4 counts above enter. RAM only unless committed via /@CP#.
 //   /@L<seconds>#   — reading interval while storing (30-14400 s, default 3600). Never shorter than the normal interval.
 //                    RAM only unless committed via /@CP#.
-//   /@O<0|1|2>#     — operator override, RAM only: 0 = force night OFF, 1 = force night ON, 2 = automatic (default). The
+//   /@O<0|1|2>#     — operator override, RAM only: 0 = force sag OFF, 1 = force sag ON, 2 = automatic (default). The
 //                    CRITICAL floor still applies. A reset returns to automatic.
 //   /@U<seq>#       — re-send: mark every saved record from sequence number <seq> on as unsent again; they go out after the
-//                    next port 1 uplink while night mode is off.
+//                    next port 1 uplink while sag mode is off.
 ////////////////////////////////////////////////////////////////
 
 #ifndef DOWNLINK_PARSER_H
@@ -123,14 +123,7 @@ enum DownlinkAction : uint8_t {
     DL_SAG_OVERRIDE,             // /@O<0|1|2>#          0 = forced off, 1 = forced on, 2 = automatic
     DL_BUFFER_RESEND,            // /@U<seq>#            mark records from seq on as unsent again
     DL_BUFFER_DISCARD,           // /@D#                 mark all unsent records as sent without transmitting
-    DL_FLUSH_SPACING_CHANGED,    // /@G<seconds>#        gap between Port 3 batches in a drain
-
-    // Aliases
-    DL_NIGHT_THRESHOLDS_CHANGED = DL_SAG_THRESHOLDS_CHANGED,
-    DL_NIGHT_INTERVAL_CHANGED   = DL_SAG_INTERVAL_CHANGED,
-    DL_NIGHT_OVERRIDE           = DL_SAG_OVERRIDE,
-    DL_NIGHT_RESEND             = DL_BUFFER_RESEND,
-    DL_NIGHT_DISCARD            = DL_BUFFER_DISCARD
+    DL_FLUSH_SPACING_CHANGED     // /@G<seconds>#        gap between Port 3 batches in a drain
 };
 
 struct DownlinkResult {
